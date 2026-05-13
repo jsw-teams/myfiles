@@ -1,0 +1,18 @@
+---
+import "../styles/pixel.css";
+const { title = "myfiles / files.js.gripe", noindex = false } = Astro.props;
+---
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>{title}</title>
+    {noindex && <meta name="robots" content="noindex,nofollow" />}
+    <meta name="description" content="JS.Gripe 文件服务 myfiles。" />
+  </head>
+  <body>
+    <slot />
+    <script type="module" src="/app/shell-nav.js?v=20260513"></script>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "account": {
+    "client_name": "myfiles",
+    "client_id": "[MYFILES_ACCOUNT_CLIENT_ID]",
+    "client_secret": "[MYFILES_ACCOUNT_APIKEY]",
+    "login_url": "https://account.js.gripe/login",
+    "account_base_url": "https://gateway.js.gripe/api/v1/myaccount",
+    "me_url": "https://gateway.js.gripe/api/v1/myaccount/me",
+    "redirect_uri": "https://files.js.gripe/auth/account/callback",
+    "scopes": [
+      "accounts:read",
+      "identities:resolve",
+      "identities:link"
+    ]
+  }
+}

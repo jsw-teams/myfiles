@@ -1,0 +1,46 @@
+{
+  "app": {
+    "name": "myfiles",
+    "base_url": "https://files.js.gripe",
+    "listen_addr": "127.0.0.1:19110",
+    "public_dir": "/opt/myfiles/frontend/dist",
+    "data_dir": "/var/lib/myfiles",
+    "temp_dir": "/var/lib/myfiles/tmp"
+  },
+  "database": { "path": "/var/lib/myfiles/myfiles.sqlite3" },
+  "account": {
+    "client_name": "myfiles",
+    "client_id": "myfiles",
+    "client_secret": "",
+    "login_url": "https://account.js.gripe/login",
+    "account_base_url": "https://gateway.js.gripe/api/v1/myaccount",
+    "me_url": "https://gateway.js.gripe/api/v1/myaccount/me",
+    "redirect_uri": "https://files.js.gripe/auth/account/callback",
+    "scopes": ["accounts:read", "identities:resolve"]
+  },
+  "storage": {
+    "mode": "tgbots",
+    "upload_url": "https://gateway.js.gripe/api/v1/tgbots",
+    "public_base_url": "https://files.js.gripe",
+    "api_key": "",
+    "chat_id": "",
+    "timeout_seconds": 120,
+    "local_dir": "/var/lib/myfiles/storage"
+  },
+  "upload": {
+    "max_bytes": 104857600,
+    "allowed_mime_types": ["*/*"],
+    "allow_anonymous": true
+  },
+  "file": {
+    "default_public": true,
+    "default_require_confirm": false,
+    "default_region_policy": "global",
+    "default_hotlink_policy": "allow"
+  },
+  "security": {
+    "session_cookie_name": "myfiles_session",
+    "session_ttl_hours": 168,
+    "cookie_secure": true
+  }
+}

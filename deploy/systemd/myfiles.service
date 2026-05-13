@@ -1,0 +1,23 @@
+[Unit]
+Description=JS.Gripe myfiles service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=myfiles
+Group=myfiles
+WorkingDirectory=/opt/myfiles
+ExecStart=/opt/myfiles/bin/myfilesd -config /etc/myfiles/config.json
+Restart=on-failure
+RestartSec=3
+Environment=GODEBUG=madvdontneed=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/myfiles
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

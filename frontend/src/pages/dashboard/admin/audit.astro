@@ -1,0 +1,12 @@
+---
+import Base from "../../../layouts/Base.astro";
+---
+<Base title="审计日志 / myfiles" noindex={true}>
+  <main class="pixel-shell grid">
+    <section class="pixel-card grid">
+      <div><div class="pixel-kicker">admin/audit</div><h1>审计日志</h1></div>
+      <table class="table"><thead><tr><th>时间</th><th>Actor</th><th>Action</th><th>Target</th></tr></thead><tbody id="rows"></tbody></table>
+    </section>
+  </main>
+  <script type="module" src="/app/audit.js?v=20260513"></script>
+</Base>

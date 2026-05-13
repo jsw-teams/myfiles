@@ -1,0 +1,50 @@
+---
+import Base from "../layouts/Base.astro";
+---
+<Base title="登录 / myfiles" noindex={true}>
+  <main class="login-page pixel-auth">
+    <section class="login-card">
+      <div class="login-art">
+        <img src="/assets/mascot-files.png" alt="JS.Gripe bear" />
+        <div class="pixel-kicker">JS.Gripe Identity</div>
+        <h1>myfiles</h1>
+      </div>
+      <div class="login-form-panel">
+        <div class="pixel-kicker">files.js.gripe</div>
+        <h2>使用统一账户登录</h2>
+        <p style="color:var(--muted)">登录成功后将进入文件控制台。</p>
+        <button id="login" class="pixel-button">打开统一账户登录</button>
+        <div id="alert" class="pixel-alert" role="alert" style="display:none"></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const btn = document.querySelector("#login");
+    const alertBox = document.querySelector("#alert");
+    const showError = (text) => { alertBox.textContent = text || "登录未完成，请重试。"; alertBox.style.display = "block"; };
+    const params = new URLSearchParams(location.search);
+    if (params.get("error")) showError("统一账户登录未完成，请重新尝试。");
+
+    btn.addEventListener("click", () => {
+      alertBox.style.display = "none";
+      const popup = window.open("/auth/account/start?popup=1", "myfilesAccountLogin", "popup=yes,width=520,height=720");
+      if (!popup) {
+        location.href = "/auth/account/start?popup=1";
+        return;
+      }
+      const timer = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(timer);
+        }
+      }, 700);
+    });
+
+    window.addEventListener("message", (event) => {
+      if (event.origin !== location.origin) return;
+      const data = event.data || {};
+      if (data.source !== "myfiles-auth") return;
+      if (data.status === "ok") location.href = data.redirectTo || "/dashboard";
+      else showError(data.message);
+    });
+  </script>
+</Base>

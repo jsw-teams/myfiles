@@ -1,0 +1,16 @@
+{
+  "name": "myfiles-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1 --port 4322",
+    "build": "astro build && node scripts/seo-postbuild.mjs",
+    "preview": "astro preview --host 127.0.0.1 --port 4322"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "3.7.2",
+    "astro": "6.3.1",
+    "vite": "8.0.12"
+  }
+}

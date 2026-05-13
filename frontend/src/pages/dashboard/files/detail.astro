@@ -1,0 +1,13 @@
+---
+import Base from "../../../layouts/Base.astro";
+---
+<Base title="文件详情 / myfiles" noindex={true}>
+  <main class="pixel-shell">
+    <section class="pixel-card grid">
+      <a href="/dashboard/files">← 返回我的文件</a>
+      <div><div class="pixel-kicker">file detail</div><h1 id="name">文件详情</h1></div>
+      <div id="detail" class="grid"></div>
+    </section>
+  </main>
+  <script type="module" src="/app/file-detail.js?v=20260513"></script>
+</Base>

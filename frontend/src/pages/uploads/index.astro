@@ -1,0 +1,13 @@
+---
+import Base from "../../layouts/Base.astro";
+---
+<Base title="上传结果 / myfiles" noindex={true}>
+  <main class="pixel-shell">
+    <section class="pixel-card grid">
+      <div><div class="pixel-kicker">upload result</div><h1>上传结果</h1></div>
+      <div id="result" class="grid"></div>
+      <a class="pixel-button secondary" href="/">继续上传</a>
+    </section>
+  </main>
+  <script type="module" src="/app/upload-result.js?v=20260513"></script>
+</Base>

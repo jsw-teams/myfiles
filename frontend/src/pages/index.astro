@@ -1,0 +1,153 @@
+---
+import Base from "../layouts/Base.astro";
+---
+<Base title="myfiles / files.js.gripe">
+  <main class="pixel-shell home-shell">
+    <section class="pixel-card home-panel">
+      <div class="home-mascot" aria-hidden="true">
+        <img src="/assets/mascot-files.png" alt="" />
+        <span></span>
+      </div>
+
+      <div class="home-content grid">
+        <div class="brand">
+          <img src="/assets/mascot-files.png" alt="JS.Gripe bear" />
+          <div>
+            <div class="pixel-kicker">files.js.gripe</div>
+            <h1>myfiles</h1>
+          </div>
+        </div>
+
+        <form id="upload-form" class="grid" enctype="multipart/form-data">
+          <label class="upload-zone">
+            <strong>选择或拖放文件</strong>
+            <p style="color:var(--muted)">上传限制以服务端策略为准。</p>
+            <input id="file-input" name="files" type="file" multiple hidden />
+          </label>
+          <div id="selected" class="file-list"></div>
+          <div class="progress-wrap" id="upload-progress-wrap" hidden>
+            <div class="progress-bar"><span id="upload-progress-bar"></span></div>
+            <div id="upload-progress-text">等待上传</div>
+          </div>
+          <button class="pixel-button" type="submit">上传文件</button>
+        </form>
+
+        <a class="pixel-button secondary" href="/login">使用统一账户登录</a>
+        <div id="status" role="alert"></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const form = document.querySelector("#upload-form");
+    const input = document.querySelector("#file-input");
+    const selected = document.querySelector("#selected");
+    const status = document.querySelector("#status");
+    const progressWrap = document.querySelector("#upload-progress-wrap");
+    const progressBar = document.querySelector("#upload-progress-bar");
+    const progressText = document.querySelector("#upload-progress-text");
+    let bootstrap = null;
+    fetch("/api/bootstrap").then(r => r.json()).then(j => { bootstrap = j; }).catch(() => {});
+
+    input.addEventListener("change", () => {
+      selected.innerHTML = "";
+      for (const file of input.files) {
+        const row = document.createElement("div");
+        row.className = "file-row";
+        const isImage = file.type.startsWith("image/");
+        row.innerHTML = isImage ? `<img class="file-preview" alt="" /> <strong>${file.name}</strong>` : `<span class="file-badge">FILE</span> <strong>${file.name}</strong>`;
+        if (isImage) row.querySelector("img").src = URL.createObjectURL(file);
+        selected.appendChild(row);
+      }
+    });
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      status.className = "";
+      status.textContent = "";
+      if (!input.files.length) {
+        status.className = "pixel-alert";
+        status.textContent = "请先选择文件。";
+        return;
+      }
+      const max = bootstrap?.upload?.maxBytes;
+      if (max) {
+        for (const f of input.files) {
+          if (f.size > max) {
+            status.className = "pixel-alert";
+            status.textContent = "文件超过当前服务端允许的上传限制。";
+            return;
+          }
+        }
+      }
+      const data = new FormData();
+      for (const f of input.files) data.append("files", f);
+      status.className = "pixel-alert";
+      status.textContent = "正在上传，请不要关闭页面。";
+      progressWrap.hidden = false;
+      setProgress(0, "准备上传");
+      let json = {};
+      try {
+        json = await uploadWithProgress(data);
+      } catch {
+        status.className = "pixel-alert";
+        status.textContent = "网络连接异常，请稍后重试。";
+        return;
+      }
+      if (!json.ok || json.status === "failed") {
+        status.className = "pixel-alert";
+        status.textContent = uploadErrorMessage(json.code, firstItemError(json));
+        setProgress(100, "上传失败");
+        return;
+      }
+      setProgress(100, "上传完成，正在打开结果页");
+      location.href = json.resultPath;
+    });
+
+    function uploadWithProgress(data) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload");
+        xhr.responseType = "json";
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable) {
+            progressText.textContent = "正在上传，等待服务端确认…";
+            return;
+          }
+          const pct = Math.max(1, Math.round((event.loaded / event.total) * 100));
+          setProgress(pct, `已上传 ${pct}%`);
+        };
+        xhr.onload = () => {
+          const body = xhr.response || {};
+          if (xhr.status < 200 || xhr.status >= 300) {
+            body.ok = false;
+          }
+          resolve(body);
+        };
+        xhr.onerror = reject;
+        xhr.send(data);
+      });
+    }
+
+    function setProgress(percent, text) {
+      progressBar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+      progressText.textContent = text;
+    }
+
+    function firstItemError(json) {
+      const item = Array.isArray(json.items) ? json.items.find((entry) => entry && entry.ok === false) : null;
+      return item?.error || json.error;
+    }
+
+    function uploadErrorMessage(code, fallback) {
+      const messages = {
+        unauthorized: "请先使用统一账户登录后再上传。",
+        upload_too_large: "文件超过当前允许的上传限制。",
+        file_required: "没有收到文件，请重新选择。",
+        mime_not_allowed: "当前文件类型不允许上传。",
+        storage_upload_failed: "存储通道暂时不可用，请稍后重试。",
+        db_error: "文件记录保存失败，请稍后重试。"
+      };
+      return messages[code] || fallback || "上传失败，请稍后重试。";
+    }
+  </script>
+</Base>

@@ -1,0 +1,20 @@
+---
+import Base from "../../layouts/Base.astro";
+---
+<Base title="Dashboard / myfiles" noindex={true}>
+  <main class="pixel-shell dashboard-layout">
+    <aside class="pixel-card sidebar">
+      <div class="brand"><img src="/assets/bear.svg" alt="" /><strong>myfiles</strong></div>
+      <nav id="nav" class="nav"></nav>
+    </aside>
+    <section class="pixel-card grid">
+      <div>
+        <div class="pixel-kicker">dashboard</div>
+        <h1 id="title">文件控制台</h1>
+        <p id="profile" style="color:var(--muted)"></p>
+      </div>
+      <div id="cards" class="grid two"></div>
+    </section>
+  </main>
+  <script type="module" src="/app/dashboard.js?v=20260513"></script>
+</Base>
