@@ -1,106 +1,198 @@
 ---
 import Base from "../layouts/Base.astro";
 ---
-<Base title="myfiles / files.js.gripe">
-  <main class="pixel-shell home-shell">
-    <section class="pixel-card home-panel">
-      <div class="home-mascot" aria-hidden="true">
-        <img src="/assets/mascot-files.png" alt="" />
-        <span></span>
+<Base titleKey="home">
+  <main id="main-content" class="pixel-shell home-shell">
+    <section class="home-panel">
+      <div class="home-art" aria-hidden="true">
+        <img src="/assets/pickup-hero-pixel-bear.png" alt="" />
       </div>
 
       <div class="home-content grid">
         <div class="brand">
-          <img src="/assets/mascot-files.png" alt="JS.Gripe bear" />
+          <span class="brand-mark" aria-hidden="true">⇪</span>
           <div>
-            <div class="pixel-kicker">files.js.gripe</div>
-            <h1>myfiles</h1>
+            <div class="pixel-kicker" data-brand>myfiles</div>
+            <h1 data-brand>myfiles</h1>
           </div>
         </div>
 
-        <form id="upload-form" class="grid" enctype="multipart/form-data">
+        <section class="action-panel pickup-panel">
+          <div>
+            <div class="panel-title"><span class="icon" aria-hidden="true">⌁</span><span data-i18n="pickupTitle">取件码</span></div>
+            <p class="muted" data-i18n="pickupDesc">输入对方给你的 24 小时取件码，直接打开本次上传的文件。</p>
+          </div>
+          <form id="pickup-form" class="pickup-form">
+            <input id="pickup-code" class="input pickup-input" name="code" inputmode="latin" autocomplete="one-time-code" placeholder="例如 8F7K2QMA" data-i18n-placeholder="pickupPlaceholder" maxlength="12" />
+            <button class="pixel-button compact" type="submit" data-i18n="pickupButton">取件</button>
+          </form>
+          <div id="pickup-status" role="alert"></div>
+        </section>
+
+        <form id="upload-form" class="action-panel grid" enctype="multipart/form-data">
+          <div class="panel-title"><span class="icon" aria-hidden="true">⇧</span><span data-i18n="uploadTitle">上传文件</span></div>
           <label class="upload-zone">
-            <strong>选择或拖放文件</strong>
-            <p style="color:var(--muted)">上传限制以服务端策略为准。</p>
+            <strong data-i18n="uploadChoose">选择或拖放文件</strong>
+            <p class="muted" data-i18n="uploadDesc">上传完成后会生成 24 小时取件码，可发给对方快捷获取。</p>
             <input id="file-input" name="files" type="file" multiple hidden />
           </label>
           <div id="selected" class="file-list"></div>
-          <div class="progress-wrap" id="upload-progress-wrap" hidden>
-            <div class="progress-bar"><span id="upload-progress-bar"></span></div>
-            <div id="upload-progress-text">等待上传</div>
-          </div>
-          <button class="pixel-button" type="submit">上传文件</button>
+          <button class="pixel-button" type="submit" data-i18n="uploadButton">上传文件</button>
         </form>
 
-        <a class="pixel-button secondary" href="/login">使用统一账户登录</a>
+        <div class="home-actions">
+          <a class="pixel-button secondary" href="/login" data-i18n="accountLogin">统一账户登录</a>
+        </div>
         <div id="status" role="alert"></div>
+        <section id="result-panel" class="action-panel grid" hidden>
+          <div class="panel-title"><span class="icon" aria-hidden="true">✓</span><span data-i18n="resultTitle">取件结果</span></div>
+          <div id="result" class="grid"></div>
+        </section>
       </div>
     </section>
+    <div id="upload-modal" class="upload-modal" hidden>
+      <div class="upload-dialog" role="dialog" aria-modal="true" aria-labelledby="upload-dialog-title">
+        <div class="mascot-chat">
+          <img src="/assets/mascot-files.png" alt="" />
+          <div>
+            <strong id="upload-dialog-title" data-i18n="movingFiles">黑熊正在搬运文件</strong>
+            <span id="upload-progress-text" data-i18n="waitingUpload">等待上传</span>
+          </div>
+        </div>
+        <div class="progress-bar"><span id="upload-progress-bar"></span></div>
+        <button id="cancel-upload" class="pixel-button danger compact" type="button" data-i18n="cancelUpload">取消上传</button>
+      </div>
+    </div>
   </main>
+  <script type="module" src="/app/upload-result.js?v=20260516m"></script>
   <script>
     const form = document.querySelector("#upload-form");
     const input = document.querySelector("#file-input");
     const selected = document.querySelector("#selected");
     const status = document.querySelector("#status");
-    const progressWrap = document.querySelector("#upload-progress-wrap");
     const progressBar = document.querySelector("#upload-progress-bar");
     const progressText = document.querySelector("#upload-progress-text");
+    const uploadModal = document.querySelector("#upload-modal");
+    const cancelUpload = document.querySelector("#cancel-upload");
+    const pickupForm = document.querySelector("#pickup-form");
+    const pickupInput = document.querySelector("#pickup-code");
+    const pickupStatus = document.querySelector("#pickup-status");
+    let labels = { fileBadge: "文件" };
     let bootstrap = null;
+    let currentUpload = null;
+    let selectedFiles = [];
     fetch("/api/bootstrap").then(r => r.json()).then(j => { bootstrap = j; }).catch(() => {});
+    document.addEventListener("site-i18n-ready", (event) => { labels = event.detail?.labels || labels; });
+
+    cancelUpload.addEventListener("click", () => {
+      currentUpload?.abort();
+      setProgress(0, msg("uploadCancelled"));
+      uploadModal.hidden = true;
+      status.className = "pixel-alert";
+      status.textContent = msg("uploadCancelled");
+    });
+
+    pickupInput.addEventListener("input", () => {
+      pickupInput.value = normalizePickupCode(pickupInput.value);
+    });
+
+    pickupForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const code = normalizePickupCode(pickupInput.value);
+      pickupStatus.className = "";
+      pickupStatus.textContent = "";
+      if (!code) {
+        pickupStatus.className = "pixel-alert";
+        pickupStatus.textContent = msg("pickupRequired");
+        return;
+      }
+      pickupStatus.className = "pixel-alert ok";
+      pickupStatus.textContent = msg("pickupChecking");
+      try {
+        const res = await fetch("/api/pickup/" + encodeURIComponent(code), { cache: "no-store" });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || !json.ok) {
+          pickupStatus.className = "pixel-alert";
+          pickupStatus.textContent = msg("pickupMissing");
+          return;
+        }
+        location.href = "/?code=" + encodeURIComponent(code);
+      } catch {
+        pickupStatus.className = "pixel-alert";
+        pickupStatus.textContent = msg("networkError");
+      }
+    });
 
     input.addEventListener("change", () => {
+      selectedFiles = Array.from(input.files || []);
+      syncFileInput();
+      renderSelectedFiles();
+    });
+
+    selected.addEventListener("click", (event) => {
+      const remove = event.target.closest("[data-remove-file]");
+      if (!remove) return;
+      selectedFiles.splice(Number(remove.dataset.removeFile), 1);
+      syncFileInput();
+      renderSelectedFiles();
+    });
+
+    function renderSelectedFiles() {
       selected.innerHTML = "";
-      for (const file of input.files) {
+      selectedFiles.forEach((file, index) => {
         const row = document.createElement("div");
         row.className = "file-row";
         const isImage = file.type.startsWith("image/");
-        row.innerHTML = isImage ? `<img class="file-preview" alt="" /> <strong>${file.name}</strong>` : `<span class="file-badge">FILE</span> <strong>${file.name}</strong>`;
+        const preview = isImage ? `<img class="file-preview" alt="" />` : `<span class="file-badge" aria-hidden="true">${fileIcon(file)}</span>`;
+        row.innerHTML = `${preview}<div class="file-info"><strong>${escapeHtml(file.name)}</strong><span>${escapeHtml(file.type || fileKind(file))} · ${formatSize(file.size)}</span></div><button class="icon-button danger" type="button" data-remove-file="${index}" aria-label="Remove ${escapeAttr(file.name)}">×</button>`;
         if (isImage) row.querySelector("img").src = URL.createObjectURL(file);
         selected.appendChild(row);
-      }
-    });
+      });
+    }
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       status.className = "";
       status.textContent = "";
-      if (!input.files.length) {
+      if (!selectedFiles.length) {
         status.className = "pixel-alert";
-        status.textContent = "请先选择文件。";
+        status.textContent = msg("chooseFile");
         return;
       }
       const max = bootstrap?.upload?.maxBytes;
       if (max) {
-        for (const f of input.files) {
+        for (const f of selectedFiles) {
           if (f.size > max) {
             status.className = "pixel-alert";
-            status.textContent = "文件超过当前服务端允许的上传限制。";
+            status.textContent = msg("uploadTooLarge");
             return;
           }
         }
       }
       const data = new FormData();
-      for (const f of input.files) data.append("files", f);
-      status.className = "pixel-alert";
-      status.textContent = "正在上传，请不要关闭页面。";
-      progressWrap.hidden = false;
-      setProgress(0, "准备上传");
+      for (const f of selectedFiles) data.append("files", f);
+      status.className = "";
+      status.textContent = "";
+      uploadModal.hidden = false;
+      setProgress(0, msg("uploadPrepare"));
       let json = {};
       try {
         json = await uploadWithProgress(data);
       } catch {
+        uploadModal.hidden = true;
         status.className = "pixel-alert";
-        status.textContent = "网络连接异常，请稍后重试。";
+        status.textContent = msg("networkError");
         return;
       }
       if (!json.ok || json.status === "failed") {
+        uploadModal.hidden = true;
         status.className = "pixel-alert";
         status.textContent = uploadErrorMessage(json.code, firstItemError(json));
-        setProgress(100, "上传失败");
+        setProgress(100, msg("uploadFailed"));
         return;
       }
-      setProgress(100, "上传完成，正在打开结果页");
-      location.href = json.resultPath;
+      setProgress(100, msg("uploadDone"));
+      location.href = json.downloadPath || json.resultPath;
     });
 
     function uploadWithProgress(data) {
@@ -108,22 +200,25 @@ import Base from "../layouts/Base.astro";
         const xhr = new XMLHttpRequest();
         xhr.open("POST", "/api/upload");
         xhr.responseType = "json";
+        currentUpload = xhr;
         xhr.upload.onprogress = (event) => {
           if (!event.lengthComputable) {
-            progressText.textContent = "正在上传，等待服务端确认…";
+            progressText.textContent = msg("uploadWaitingServer");
             return;
           }
           const pct = Math.max(1, Math.round((event.loaded / event.total) * 100));
-          setProgress(pct, `已上传 ${pct}%`);
+          setProgress(pct, msg("uploadedPct").replace("{pct}", pct));
         };
         xhr.onload = () => {
           const body = xhr.response || {};
           if (xhr.status < 200 || xhr.status >= 300) {
             body.ok = false;
           }
+          currentUpload = null;
           resolve(body);
         };
-        xhr.onerror = reject;
+        xhr.onerror = () => { currentUpload = null; reject(); };
+        xhr.onabort = () => { currentUpload = null; resolve({ ok: false, code: "upload_cancelled", error: msg("uploadCancelled") }); };
         xhr.send(data);
       });
     }
@@ -140,14 +235,69 @@ import Base from "../layouts/Base.astro";
 
     function uploadErrorMessage(code, fallback) {
       const messages = {
-        unauthorized: "请先使用统一账户登录后再上传。",
-        upload_too_large: "文件超过当前允许的上传限制。",
-        file_required: "没有收到文件，请重新选择。",
-        mime_not_allowed: "当前文件类型不允许上传。",
-        storage_upload_failed: "存储通道暂时不可用，请稍后重试。",
-        db_error: "文件记录保存失败，请稍后重试。"
+        unauthorized: msg("authNeeded"),
+        upload_too_large: msg("uploadTooLarge"),
+        file_required: msg("fileRequired"),
+        mime_not_allowed: msg("mimeNotAllowed"),
+        storage_upload_failed: msg("storageFailed"),
+        db_error: msg("dbFailed"),
+        upload_cancelled: msg("uploadCancelled")
       };
-      return messages[code] || fallback || "上传失败，请稍后重试。";
+      return messages[code] || fallback || msg("uploadFailedGeneric");
+    }
+
+    function msg(key) {
+      return labels[key] || key;
+    }
+
+    function syncFileInput() {
+      const dt = new DataTransfer();
+      selectedFiles.forEach((file) => dt.items.add(file));
+      input.files = dt.files;
+    }
+
+    function fileIcon(file) {
+      const type = file.type || "";
+      const name = file.name || "";
+      if (type.startsWith("image/")) return "▧";
+      if (type.startsWith("video/")) return "▶";
+      if (type.startsWith("audio/")) return "♪";
+      if (/pdf$/i.test(type) || /\.pdf$/i.test(name)) return "◫";
+      if (/zip|rar|7z|tar|gzip|compressed|archive/i.test(type) || /\.(zip|rar|7z|tar|gz)$/i.test(name)) return "▣";
+      if (/json|javascript|typescript|xml|html|css|shell|python|go|rust|code/i.test(type) || /\.(js|ts|json|xml|html|css|sh|py|go|rs)$/i.test(name)) return "{ }";
+      if (/spreadsheet|excel|csv/i.test(type) || /\.(xlsx?|csv)$/i.test(name)) return "▦";
+      if (/presentation|powerpoint/i.test(type) || /\.(pptx?|key)$/i.test(name)) return "▥";
+      if (/text|document|word/i.test(type) || /\.(txt|md|docx?|rtf)$/i.test(name)) return "▤";
+      return "◇";
+    }
+
+    function fileKind(file) {
+      return (file.name || "").split(".").pop()?.toUpperCase() || (labels.fileBadge || "文件");
+    }
+
+    function formatSize(n) {
+      n = Number(n || 0);
+      if (n > 1048576) return (n / 1048576).toFixed(1) + " MiB";
+      if (n > 1024) return (n / 1024).toFixed(1) + " KiB";
+      return n + " B";
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[char]);
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value).replace(/`/g, "&#96;");
+    }
+
+    function normalizePickupCode(value) {
+      return String(value || "").toUpperCase().replace(/[^0-9A-Z]/g, "").slice(0, 12);
     }
   </script>
 </Base>

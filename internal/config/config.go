@@ -17,6 +17,7 @@ type Config struct {
 	Upload     UploadConfig   `json:"upload"`
 	File       FileConfig     `json:"file"`
 	Security   SecurityConfig `json:"security"`
+	Audit      AuditConfig    `json:"audit"`
 }
 
 type AppConfig struct {
@@ -72,6 +73,10 @@ type SecurityConfig struct {
 	CookieSecure      bool   `json:"cookie_secure"`
 }
 
+type AuditConfig struct {
+	RetentionDays int `json:"retention_days"`
+}
+
 func Load(path string) (Config, error) {
 	cfg := Default()
 	raw, err := os.ReadFile(path)
@@ -112,6 +117,7 @@ func Default() Config {
 	cfg.Upload = UploadConfig{MaxBytes: 100 * 1024 * 1024, AllowedMIMETypes: []string{"*/*"}, AllowAnonymous: true}
 	cfg.File = FileConfig{DefaultPublic: true, DefaultRequireConfirm: false, DefaultRegionPolicy: "global", DefaultHotlinkPolicy: "allow"}
 	cfg.Security = SecurityConfig{SessionCookieName: "myfiles_session", SessionTTLHours: 168, CookieSecure: false}
+	cfg.Audit = AuditConfig{RetentionDays: 180}
 	return cfg
 }
 
@@ -164,6 +170,9 @@ func normalize(cfg *Config) {
 	if cfg.File.DefaultRegionPolicy == "" {
 		cfg.File.DefaultRegionPolicy = "global"
 	}
+	if cfg.File.DefaultRegionPolicy == "cn" || cfg.File.DefaultRegionPolicy == "overseas" {
+		cfg.File.DefaultRegionPolicy = "global"
+	}
 	if cfg.File.DefaultHotlinkPolicy == "" {
 		cfg.File.DefaultHotlinkPolicy = "allow"
 	}
@@ -172,6 +181,9 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Security.SessionTTLHours <= 0 {
 		cfg.Security.SessionTTLHours = int((168 * time.Hour).Hours())
+	}
+	if cfg.Audit.RetentionDays <= 0 {
+		cfg.Audit.RetentionDays = 180
 	}
 }
 

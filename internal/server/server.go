@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -100,12 +101,20 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.handleUpload(w, r)
 	case p == "/api/files":
 		a.handleFiles(w, r)
+	case p == "/api/files/batch":
+		a.handleFilesBatch(w, r)
 	case strings.HasPrefix(p, "/api/files/"):
 		a.handleFileAPI(w, r)
+	case strings.HasPrefix(p, "/api/shares/"):
+		a.handleShareAPI(w, r)
 	case strings.HasPrefix(p, "/api/uploads/"):
 		a.handleUploadBatch(w, r)
+	case strings.HasPrefix(p, "/api/pickup/"):
+		a.handlePickup(w, r)
 	case p == "/api/admin/files":
 		a.handleAdminFiles(w, r)
+	case p == "/api/admin/files/batch":
+		a.handleAdminFilesBatch(w, r)
 	case strings.HasPrefix(p, "/api/admin/files/"):
 		a.handleAdminFileAPI(w, r)
 	case strings.HasPrefix(p, "/admin/open/"):
@@ -116,8 +125,16 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.handleAdminSettings(w, r)
 	case p == "/api/admin/storage/test":
 		a.handleAdminStorageTest(w, r)
+	case p == "/download":
+		a.handleDownloadPage(w, r)
 	case strings.HasPrefix(p, "/file/"), strings.HasPrefix(p, "/f/"):
 		a.handlePublicFile(w, r)
+	case strings.HasPrefix(p, "/pickup/"):
+		a.handlePickupFile(w, r)
+	case isLegacyConsolePath(p):
+		http.Redirect(w, r, legacyConsoleTarget(p), http.StatusFound)
+	case strings.HasPrefix(p, "/uploads"):
+		a.redirectLegacyUploadResult(w, r)
 	default:
 		a.serveFrontend(w, r)
 	}
@@ -129,9 +146,10 @@ func (a *App) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	policy := a.effectiveUploadPolicy()
+	cfg := a.snapshotConfig()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":    true,
-		"brand": map[string]any{"name": "myfiles", "domain": "files.js.gripe"},
+		"brand": map[string]any{"name": cfg.App.Name, "origin": requestOrigin(r)},
 		"upload": map[string]any{
 			"maxBytes":         policy.MaxBytes,
 			"allowedMimeTypes": policy.AllowedMIMETypes,
@@ -318,7 +336,16 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = myfiles.UpdateBatchCounts(a.db, batch.ID, total, success, failed, status)
 	audit.Write(a.db, r, audit.Actor{AccountUserID: owner, Role: role}, "upload.create", "upload_batch", batch.ID, map[string]any{"total": total, "success": success, "failed": failed})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "batchId": batch.ID, "status": status, "items": items, "resultPath": "/uploads/" + batch.ID})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"batchId":         batch.ID,
+		"pickupCode":      batch.PickupCode,
+		"pickupExpiresAt": batch.PickupExpiresAt,
+		"status":          status,
+		"items":           items,
+		"resultPath":      "/?upload=" + url.QueryEscape(batch.ID),
+		"downloadPath":    "/download?upload=" + url.QueryEscape(batch.ID),
+	})
 }
 
 func (a *App) processOneUpload(r *http.Request, batchID, owner string, fh *multipart.FileHeader, policy uploadPolicy) (myfiles.File, string, error) {
@@ -371,8 +398,8 @@ func (a *App) processOneUpload(r *http.Request, batchID, owner string, fh *multi
 		return myfiles.File{}, "storage_upload_failed", fmt.Errorf("存储通道上传失败：%v", err)
 	}
 
-	publicURL := a.cfg.App.BaseURL + publicFilePath(fileID, fh.Filename)
-	if up.PublicURL != "" {
+	publicURL := a.publicBaseURL(r) + publicFilePath(fileID, fh.Filename)
+	if up.PublicURL != "" && !isLocalBaseURL(up.PublicURL) {
 		publicURL = up.PublicURL
 	}
 	f, err := myfiles.CreateFile(a.db, myfiles.CreateFileInput{
@@ -445,7 +472,73 @@ func (a *App) handleFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "db_error", "读取文件列表失败", nil)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "files": list})
+	files := make([]map[string]any, 0, len(list))
+	for _, f := range list {
+		files = append(files, a.filePayload(f))
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "files": files})
+}
+
+func (a *App) handleFilesBatch(w http.ResponseWriter, r *http.Request) {
+	s, err := a.readSession(r)
+	if err != nil {
+		writeError(w, 401, "unauthorized", "请先使用统一账户登录", nil)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	var body struct {
+		Action  string   `json:"action"`
+		FileIDs []string `json:"fileIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "bad_json", "请求体格式错误", nil)
+		return
+	}
+	idsList := cleanIDs(body.FileIDs, 100)
+	if len(idsList) == 0 {
+		writeError(w, 400, "empty_selection", "请选择文件", nil)
+		return
+	}
+	authorized := make([]string, 0, len(idsList))
+	for _, id := range idsList {
+		f, err := myfiles.GetFile(a.db, id, false)
+		if err != nil {
+			continue
+		}
+		if f.OwnerUserID != s.User.ID && !s.Permissions.AllFilesWrite {
+			writeError(w, 403, "forbidden", "包含无权操作的文件", nil)
+			return
+		}
+		authorized = append(authorized, id)
+	}
+	if len(authorized) == 0 {
+		writeError(w, 404, "not_found", "文件不存在", nil)
+		return
+	}
+	switch body.Action {
+	case "delete":
+		deleted := 0
+		for _, id := range authorized {
+			if err := myfiles.SoftDelete(a.db, id); err == nil {
+				deleted++
+			}
+		}
+		audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "file.batch.delete", "file", "", map[string]any{"count": deleted, "fileIds": authorized})
+		writeJSON(w, 200, map[string]any{"ok": true, "deleted": deleted})
+	case "share":
+		share, err := myfiles.CreatePickupShare(a.db, s.User.ID, authorized)
+		if err != nil {
+			writeError(w, 500, "db_error", "创建取件码失败", nil)
+			return
+		}
+		audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "share.batch.create", "file", "", map[string]any{"pickupCode": share.PickupCode, "count": len(authorized), "fileIds": authorized})
+		writeJSON(w, 200, map[string]any{"ok": true, "share": share, "url": "/download?code=" + url.QueryEscape(share.PickupCode)})
+	default:
+		writeError(w, 400, "bad_action", "不支持的批量操作", nil)
+	}
 }
 
 func (a *App) handleFileAPI(w http.ResponseWriter, r *http.Request) {
@@ -455,6 +548,11 @@ func (a *App) handleFileAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/files/")
+	shareRequest := false
+	if strings.HasSuffix(id, "/share") {
+		id = strings.TrimSuffix(id, "/share")
+		shareRequest = true
+	}
 	f, err := myfiles.GetFile(a.db, id, false)
 	if err != nil {
 		writeError(w, 404, "not_found", "文件不存在", nil)
@@ -466,7 +564,24 @@ func (a *App) handleFileAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, 200, map[string]any{"ok": true, "file": f})
+		shares, _ := myfiles.ListPickupSharesForFile(a.db, id)
+		writeJSON(w, 200, map[string]any{"ok": true, "file": a.filePayload(f), "shares": shares})
+	case http.MethodPost:
+		if shareRequest {
+			if f.OwnerUserID != s.User.ID && !s.Permissions.AllFilesWrite {
+				writeError(w, 403, "forbidden", "无权分享该文件", nil)
+				return
+			}
+			share, err := myfiles.CreatePickupShare(a.db, s.User.ID, []string{id})
+			if err != nil {
+				writeError(w, 500, "db_error", "创建取件码失败", nil)
+				return
+			}
+			audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "share.create", "file", id, map[string]any{"pickupCode": share.PickupCode})
+			writeJSON(w, 200, map[string]any{"ok": true, "share": share, "url": "/download?code=" + url.QueryEscape(share.PickupCode)})
+			return
+		}
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
 	case http.MethodDelete:
 		if f.OwnerUserID != s.User.ID && !s.Permissions.AllFilesWrite {
 			writeError(w, 403, "forbidden", "无权删除该文件", nil)
@@ -483,6 +598,59 @@ func (a *App) handleFileAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) filePayload(f myfiles.File) map[string]any {
+	payload := map[string]any{
+		"id":              f.ID,
+		"batchId":         f.BatchID,
+		"ownerUserId":     f.OwnerUserID,
+		"originalName":    f.OriginalName,
+		"storedName":      f.StoredName,
+		"mime":            f.MIME,
+		"size":            f.Size,
+		"sha256":          f.SHA256,
+		"imageWidth":      f.ImageWidth,
+		"imageHeight":     f.ImageHeight,
+		"storageProvider": f.StorageProvider,
+		"storageFileId":   f.StorageFileID,
+		"storageUrl":      f.StorageURL,
+		"publicUrl":       f.PublicURL,
+		"isPublic":        f.IsPublic,
+		"requireConfirm":  f.RequireConfirm,
+		"regionPolicy":    f.RegionPolicy,
+		"hotlinkPolicy":   f.HotlinkPolicy,
+		"status":          f.Status,
+		"createdAt":       f.CreatedAt,
+		"updatedAt":       f.UpdatedAt,
+	}
+	if f.BatchID != "" {
+		if b, _, err := myfiles.GetBatch(a.db, f.BatchID); err == nil && myfiles.ShareActive(myfiles.PickupShare{PickupExpiresAt: b.PickupExpiresAt}) {
+			payload["uploadPickupCode"] = b.PickupCode
+			payload["uploadPickupExpiresAt"] = b.PickupExpiresAt
+		}
+	}
+	return payload
+}
+
+func (a *App) handleShareAPI(w http.ResponseWriter, r *http.Request) {
+	s, err := a.readSession(r)
+	if err != nil {
+		writeError(w, 401, "unauthorized", "请先使用统一账户登录", nil)
+		return
+	}
+	code := strings.TrimPrefix(r.URL.Path, "/api/shares/")
+	if r.Method != http.MethodDelete {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	share, err := myfiles.RevokePickupShare(a.db, code, s.User.ID, s.Permissions.AllFilesWrite)
+	if err != nil {
+		writeError(w, 404, "not_found", "分享取件码不存在或已失效", nil)
+		return
+	}
+	audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "share.revoke", "pickup_share", share.ID, map[string]any{"pickupCode": share.PickupCode})
+	writeJSON(w, 200, map[string]any{"ok": true, "share": share})
+}
+
 func (a *App) handleUploadBatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
@@ -494,18 +662,310 @@ func (a *App) handleUploadBatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "not_found", "上传批次不存在", nil)
 		return
 	}
-	s, _ := a.readSession(r)
-	if b.OwnerUserID != "" {
-		if s == nil {
-			writeError(w, 401, "unauthorized", "请先登录查看该上传批次", nil)
-			return
-		}
-		if s.User.ID != b.OwnerUserID && !s.Permissions.AllFilesRead {
-			writeError(w, 403, "forbidden", "无权查看该上传批次", nil)
-			return
-		}
+	if !a.canViewBatch(w, r, b) {
+		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "batch": b, "files": list})
+}
+
+func (a *App) canViewBatch(w http.ResponseWriter, r *http.Request, b myfiles.Batch) bool {
+	s, _ := a.readSession(r)
+	if b.OwnerUserID == "" {
+		return true
+	}
+	if s == nil {
+		writeError(w, 401, "unauthorized", "请先登录查看该上传批次", nil)
+		return false
+	}
+	if s.User.ID != b.OwnerUserID && !s.Permissions.AllFilesRead {
+		writeError(w, 403, "forbidden", "无权查看该上传批次", nil)
+		return false
+	}
+	return true
+}
+
+func (a *App) handlePickup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	code := strings.TrimPrefix(r.URL.Path, "/api/pickup/")
+	b, list, err := myfiles.GetBatchByPickupCode(a.db, code)
+	if err == nil {
+		audit.Write(a.db, r, audit.Actor{}, "pickup.read", "upload_batch", b.ID, map[string]any{"pickupCode": b.PickupCode})
+		writeJSON(w, 200, map[string]any{"ok": true, "batch": b, "files": list})
+		return
+	}
+	share, list, err := myfiles.GetShareByPickupCode(a.db, code)
+	if err != nil {
+		writeError(w, 404, "pickup_not_found", "取件码不存在或已过期", nil)
+		return
+	}
+	audit.Write(a.db, r, audit.Actor{}, "pickup.read", "pickup_share", share.ID, map[string]any{"pickupCode": share.PickupCode})
+	writeJSON(w, 200, map[string]any{"ok": true, "batch": shareBatch(share, len(list)), "share": share, "files": list})
+}
+
+func (a *App) handlePickupFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/pickup/"), "/"), "/")
+	if len(parts) < 2 {
+		http.NotFound(w, r)
+		return
+	}
+	code := parts[0]
+	id := publicFileID(parts[1])
+	b, list, err := myfiles.GetBatchByPickupCode(a.db, code)
+	targetType := "upload_batch"
+	targetID := b.ID
+	if err != nil {
+		share, shareFiles, shareErr := myfiles.GetShareByPickupCode(a.db, code)
+		if shareErr != nil {
+			http.NotFound(w, r)
+			return
+		}
+		list = shareFiles
+		targetType = "pickup_share"
+		targetID = share.ID
+	}
+	var f myfiles.File
+	found := false
+	for _, item := range list {
+		if item.ID == id {
+			f = item
+			found = true
+			break
+		}
+	}
+	if !found || f.Status != "active" {
+		http.NotFound(w, r)
+		return
+	}
+	audit.Write(a.db, r, audit.Actor{}, "pickup.download", "file", f.ID, map[string]any{targetType: targetID})
+	if a.needsDownloadConfirm(r, f) {
+		http.Redirect(w, r, downloadPagePath(r.URL.String()), http.StatusFound)
+		return
+	}
+	a.serveStoredFile(w, r, f, false)
+}
+
+func shareBatch(share myfiles.PickupShare, total int) myfiles.Batch {
+	return myfiles.Batch{
+		ID:              share.ID,
+		OwnerUserID:     share.OwnerUserID,
+		PickupCode:      share.PickupCode,
+		PickupExpiresAt: share.PickupExpiresAt,
+		Status:          "active",
+		TotalFiles:      total,
+		SuccessCount:    total,
+		CreatedAt:       share.CreatedAt,
+		UpdatedAt:       share.UpdatedAt,
+	}
+}
+
+func (a *App) serveStoredFile(w http.ResponseWriter, r *http.Request, f myfiles.File, publicCache bool) {
+	if f.StorageProvider == "local" && f.StorageURL != "" {
+		w.Header().Set("Content-Type", f.MIME)
+		w.Header().Set("Content-Disposition", contentDisposition(r, f))
+		if publicCache {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "private, max-age=0, no-store")
+		}
+		http.ServeFile(w, r, f.StorageURL)
+		return
+	}
+	if f.StorageProvider == "tgbots" && f.StorageFileID != "" {
+		f.IsPublic = publicCache
+		a.streamTGBotsFile(w, r, f)
+		return
+	}
+	if f.StorageURL != "" {
+		http.Redirect(w, r, f.StorageURL, http.StatusFound)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (a *App) needsDownloadConfirm(r *http.Request, f myfiles.File) bool {
+	if r.Method == http.MethodHead || r.URL.Query().Get("download") == "1" || strings.HasPrefix(f.MIME, "image/") {
+		return false
+	}
+	if f.StorageProvider != "local" && f.StorageProvider != "tgbots" && f.StorageURL != "" {
+		return false
+	}
+	return true
+}
+
+func downloadPagePath(next string) string {
+	return "/download?next=" + url.QueryEscape(next)
+}
+
+func contentDisposition(r *http.Request, f myfiles.File) string {
+	mode := "inline"
+	if r.URL.Query().Get("download") == "1" && !strings.HasPrefix(f.MIME, "image/") {
+		mode = "attachment"
+	}
+	return mode + "; filename=" + strconv.Quote(f.OriginalName)
+}
+
+func (a *App) downloadConfirmHTML(w http.ResponseWriter, r *http.Request, f myfiles.File) {
+	next := r.URL.Query().Get("next")
+	if next == "" || strings.HasPrefix(next, "/download") || strings.HasPrefix(next, "http://") || strings.HasPrefix(next, "https://") {
+		http.NotFound(w, r)
+		return
+	}
+	u, err := url.Parse(next)
+	if err != nil || !strings.HasPrefix(u.Path, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	q := u.Query()
+	q.Set("download", "1")
+	u.RawQuery = q.Encode()
+	zh := strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "zh")
+	lang := "en"
+	title := "Confirm download"
+	message := "This file is not an image. Please confirm before downloading."
+	confirm := "Download"
+	back := "Back home"
+	if zh {
+		lang = "zh-CN"
+		title = "确认下载"
+		message = "这个文件不是图片。为避免浏览器直接打开或误触下载，请确认后继续。"
+		confirm = "确认下载"
+		back = "返回首页"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, max-age=0, no-store")
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="%s">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>%s</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f6fbff;color:#182033;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+main{width:min(560px,calc(100%% - 32px));border:4px solid #182033;border-radius:8px;background:#fff;box-shadow:8px 8px 0 #182033;padding:24px;display:grid;gap:16px}
+a{border:3px solid #182033;border-radius:6px;background:#ffd44d;color:#15120a;font-weight:900;padding:12px 16px;text-decoration:none;display:inline-flex;justify-content:center}
+.meta{color:#5d6b82;overflow-wrap:anywhere}.actions{display:flex;gap:12px;flex-wrap:wrap}.secondary{background:#fff}
+</style>
+</head>
+<body>
+<main aria-labelledby="title">
+<h1 id="title">%s</h1>
+<p>%s</p>
+<div class="meta"><strong>%s</strong><br>%s · %s</div>
+<div class="actions"><a href="%s" download>%s</a><a class="secondary" href="/">%s</a></div>
+</main>
+</body>
+</html>`, lang, html.EscapeString(title), html.EscapeString(title), html.EscapeString(message), html.EscapeString(f.OriginalName), html.EscapeString(f.MIME), html.EscapeString(formatBytes(f.Size)), html.EscapeString(u.String()), html.EscapeString(confirm), html.EscapeString(back))
+}
+
+func (a *App) downloadResultHTML(w http.ResponseWriter, r *http.Request, b myfiles.Batch, files []myfiles.File, code string) {
+	zh := strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "zh")
+	lang := "en"
+	title := "Pickup code ready"
+	codeLabel := "Pickup code"
+	copyText := "Copy link"
+	openText := "Open"
+	back := "Back home"
+	valid := "Valid until"
+	if zh {
+		lang = "zh-CN"
+		title = "取件码已生成"
+		codeLabel = "取件码"
+		copyText = "复制链接"
+		openText = "打开"
+		back = "返回首页"
+		valid = "有效期至"
+	}
+	link := requestOrigin(r) + "/download?code=" + url.QueryEscape(code)
+	var rows strings.Builder
+	for _, f := range files {
+		fileURL := publicFilePath(f.ID, f.OriginalName)
+		if code != "" {
+			fileURL = "/pickup/" + url.PathEscape(code) + "/" + url.PathEscape(f.ID) + strings.ToLower(filepath.Ext(f.OriginalName))
+		}
+		rows.WriteString(fmt.Sprintf(`<article class="file-row"><span class="file-badge">%s</span><div><strong>%s</strong><small>%s · %s</small></div><a href="%s" target="_blank">%s</a></article>`,
+			html.EscapeString(fileIcon(f.MIME, f.OriginalName)), html.EscapeString(f.OriginalName), html.EscapeString(f.MIME), html.EscapeString(formatBytes(f.Size)), html.EscapeString(fileURL), html.EscapeString(openText)))
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, max-age=0, no-store")
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="%s">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>%s</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f6fbff;color:#182033;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+main{width:min(760px,calc(100%% - 32px));border:4px solid #182033;border-radius:8px;background:#fff;box-shadow:8px 8px 0 #182033;padding:24px;display:grid;gap:16px}
+.code{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;border:3px solid #182033;border-radius:8px;background:#f6fbff;padding:14px}.code strong{font-size:34px;letter-spacing:.08em}.code span,.meta,small{color:#5d6b82}.actions{display:flex;gap:12px;flex-wrap:wrap}button,a{border:3px solid #182033;border-radius:6px;background:#ffd44d;color:#15120a;font-weight:900;padding:12px 16px;text-decoration:none;display:inline-flex;justify-content:center;cursor:pointer}.secondary{background:#fff}.file-list{display:grid;gap:10px}.file-row{display:grid;grid-template-columns:56px minmax(0,1fr) auto;gap:12px;align-items:center;border:2px solid rgba(24,32,51,.22);border-radius:8px;padding:10px}.file-badge{width:52px;height:52px;display:grid;place-items:center;border:2px solid #182033;border-radius:8px;background:#dff0ff;font-size:24px;font-weight:900}.file-row div{min-width:0}.file-row strong,.file-row small{display:block;overflow-wrap:anywhere}@media(max-width:640px){.file-row{grid-template-columns:52px 1fr}.file-row a{grid-column:1/-1}}
+</style>
+</head>
+<body>
+<main aria-labelledby="title">
+<h1 id="title">%s</h1>
+<section class="code"><div><span>%s</span><strong>%s</strong><div class="meta">%s %s</div></div><button type="button" id="copy">%s</button></section>
+<div class="actions"><a class="secondary" href="/">%s</a></div>
+<section class="file-list">%s</section>
+</main>
+<script>
+document.querySelector("#copy").addEventListener("click", async () => {
+  await navigator.clipboard?.writeText(%q);
+  document.querySelector("#copy").textContent = %q;
+});
+</script>
+</body>
+</html>`, lang, html.EscapeString(title), html.EscapeString(title), html.EscapeString(codeLabel), html.EscapeString(code), html.EscapeString(valid), html.EscapeString(formatTimeLabel(b.PickupExpiresAt)), html.EscapeString(copyText), html.EscapeString(back), rows.String(), link, copyText)
+}
+
+func fileIcon(mime, name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch {
+	case strings.HasPrefix(mime, "image/"):
+		return "▧"
+	case strings.HasPrefix(mime, "video/"):
+		return "▶"
+	case strings.HasPrefix(mime, "audio/"):
+		return "♪"
+	case strings.Contains(mime, "pdf") || ext == ".pdf":
+		return "◫"
+	case strings.Contains(mime, "zip") || strings.Contains(mime, "archive") || ext == ".zip" || ext == ".rar" || ext == ".7z" || ext == ".gz":
+		return "▣"
+	case strings.Contains(mime, "json") || strings.Contains(mime, "javascript") || strings.Contains(mime, "xml") || ext == ".js" || ext == ".json" || ext == ".html" || ext == ".css":
+		return "{ }"
+	case strings.Contains(mime, "spreadsheet") || ext == ".csv" || ext == ".xls" || ext == ".xlsx":
+		return "▦"
+	case strings.Contains(mime, "presentation") || ext == ".ppt" || ext == ".pptx":
+		return "▥"
+	case strings.HasPrefix(mime, "text/") || ext == ".txt" || ext == ".md" || ext == ".doc" || ext == ".docx":
+		return "▤"
+	default:
+		return "◇"
+	}
+}
+
+func formatTimeLabel(value string) string {
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return value
+}
+
+func formatBytes(n int64) string {
+	if n > 1024*1024 {
+		return fmt.Sprintf("%.1f MiB", float64(n)/1024/1024)
+	}
+	if n > 1024 {
+		return fmt.Sprintf("%.1f KiB", float64(n)/1024)
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 func (a *App) handleAdminFiles(w http.ResponseWriter, r *http.Request) {
@@ -524,6 +984,68 @@ func (a *App) handleAdminFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s
 	writeJSON(w, 200, map[string]any{"ok": true, "files": list})
+}
+
+func (a *App) handleAdminFilesBatch(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.requireAdmin(w, r, func(p MyfilesPermissions) bool { return p.AllFilesRead })
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	if !s.Permissions.AllFilesWrite {
+		writeError(w, 403, "forbidden", "无权批量管理文件", nil)
+		return
+	}
+	var body struct {
+		Action  string   `json:"action"`
+		FileIDs []string `json:"fileIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "bad_json", "请求体格式错误", nil)
+		return
+	}
+	idsList := cleanIDs(body.FileIDs, 200)
+	if len(idsList) == 0 {
+		writeError(w, 400, "empty_selection", "请选择文件", nil)
+		return
+	}
+	count := 0
+	for _, id := range idsList {
+		switch body.Action {
+		case "delete":
+			if err := myfiles.SoftDelete(a.db, id); err == nil {
+				count++
+			}
+		case "public":
+			v := true
+			if err := myfiles.PatchAdmin(a.db, id, &v, nil, "", "", ""); err == nil {
+				count++
+			}
+		case "private":
+			v := false
+			if err := myfiles.PatchAdmin(a.db, id, &v, nil, "", "", ""); err == nil {
+				count++
+			}
+		case "confirm":
+			v := true
+			if err := myfiles.PatchAdmin(a.db, id, nil, &v, "", "", ""); err == nil {
+				count++
+			}
+		case "no-confirm":
+			v := false
+			if err := myfiles.PatchAdmin(a.db, id, nil, &v, "", "", ""); err == nil {
+				count++
+			}
+		default:
+			writeError(w, 400, "bad_action", "不支持的批量操作", nil)
+			return
+		}
+	}
+	audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "admin.file.batch."+body.Action, "file", "", map[string]any{"count": count, "fileIds": idsList})
+	writeJSON(w, 200, map[string]any{"ok": true, "updated": count})
 }
 
 func (a *App) handleAdminFileAPI(w http.ResponseWriter, r *http.Request) {
@@ -606,6 +1128,66 @@ func (a *App) handleAdminOpenFile(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func (a *App) handleDownloadPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	if uploadID := strings.TrimSpace(r.URL.Query().Get("upload")); uploadID != "" {
+		b, list, err := myfiles.GetBatch(a.db, uploadID)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		if !a.canViewBatch(w, r, b) {
+			return
+		}
+		a.downloadResultHTML(w, r, b, list, b.PickupCode)
+		return
+	}
+	if code := strings.TrimSpace(r.URL.Query().Get("code")); code != "" {
+		b, list, err := myfiles.GetBatchByPickupCode(a.db, code)
+		if err != nil {
+			share, shareFiles, shareErr := myfiles.GetShareByPickupCode(a.db, code)
+			if shareErr != nil {
+				http.NotFound(w, r)
+				return
+			}
+			a.downloadResultHTML(w, r, shareBatch(share, len(shareFiles)), shareFiles, share.PickupCode)
+			return
+		}
+		a.downloadResultHTML(w, r, b, list, b.PickupCode)
+		return
+	}
+	next := r.URL.Query().Get("next")
+	u, err := url.Parse(next)
+	if err != nil || !strings.HasPrefix(u.Path, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	var id string
+	switch {
+	case strings.HasPrefix(u.Path, "/file/"):
+		id = publicFileID(strings.TrimPrefix(u.Path, "/file/"))
+	case strings.HasPrefix(u.Path, "/f/"):
+		id = publicFileID(strings.TrimPrefix(u.Path, "/f/"))
+	case strings.HasPrefix(u.Path, "/pickup/"):
+		parts := strings.Split(strings.Trim(strings.TrimPrefix(u.Path, "/pickup/"), "/"), "/")
+		if len(parts) >= 2 {
+			id = publicFileID(parts[1])
+		}
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	f, err := myfiles.GetFile(a.db, id, false)
+	if err != nil || strings.HasPrefix(f.MIME, "image/") {
+		http.NotFound(w, r)
+		return
+	}
+	a.downloadConfirmHTML(w, r, f)
+}
+
 func (a *App) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	_, ok := a.requireAdmin(w, r, func(p MyfilesPermissions) bool { return p.AuditRead })
 	if !ok {
@@ -615,8 +1197,15 @@ func (a *App) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
 		return
 	}
+	where := []string{"1=1"}
+	args := []any{}
+	if ip := strings.TrimSpace(r.URL.Query().Get("ip")); ip != "" {
+		where = append(where, "ip LIKE ?")
+		args = append(args, "%"+ip+"%")
+	}
+	args = append(args, limit(r, 50))
 	rows, err := a.db.Query(`SELECT id, COALESCE(actor_account_user_id,''), COALESCE(actor_role,''), action, target_type, COALESCE(target_id,''), detail_json, COALESCE(ip,''), COALESCE(user_agent,''), created_at
-		FROM audit_logs ORDER BY created_at DESC LIMIT ?`, limit(r, 200))
+		FROM audit_logs WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC LIMIT ?`, args...)
 	if err != nil {
 		writeError(w, 500, "db_error", "读取审计日志失败", nil)
 		return
@@ -649,6 +1238,12 @@ func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, 400, "bad_json", "请求体格式错误", nil)
 			return
+		}
+		if s := strings.TrimSpace(stringValue(body["site.baseUrl"])); s == "" || isLocalBaseURL(s) {
+			body["site.baseUrl"] = requestOrigin(r)
+		}
+		if s := strings.TrimSpace(stringValue(body["cdn.baseUrl"])); s == "" || isLocalBaseURL(s) {
+			body["cdn.baseUrl"] = requestOrigin(r)
 		}
 		if err := a.patchConfigSettings(body); err != nil {
 			writeError(w, 400, "config_save_failed", err.Error(), nil)
@@ -716,21 +1311,11 @@ func (a *App) handlePublicFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if f.StorageProvider == "local" && f.StorageURL != "" {
-		w.Header().Set("Content-Type", f.MIME)
-		w.Header().Set("Content-Disposition", "inline; filename="+strconv.Quote(f.OriginalName))
-		http.ServeFile(w, r, f.StorageURL)
+	if a.needsDownloadConfirm(r, f) {
+		http.Redirect(w, r, downloadPagePath(r.URL.String()), http.StatusFound)
 		return
 	}
-	if f.StorageProvider == "tgbots" && f.StorageFileID != "" {
-		a.streamTGBotsFile(w, r, f)
-		return
-	}
-	if f.StorageURL != "" {
-		http.Redirect(w, r, f.StorageURL, http.StatusFound)
-		return
-	}
-	http.NotFound(w, r)
+	a.serveStoredFile(w, r, f, true)
 }
 
 func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles.File) {
@@ -755,7 +1340,7 @@ func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles
 		return
 	}
 	w.Header().Set("Content-Type", f.MIME)
-	w.Header().Set("Content-Disposition", "inline; filename="+strconv.Quote(f.OriginalName))
+	w.Header().Set("Content-Disposition", contentDisposition(r, f))
 	if resp.Header.Get("Content-Length") != "" {
 		w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
 	}
@@ -859,13 +1444,52 @@ func (a *App) serveFrontend(w http.ResponseWriter, r *http.Request) {
 
 func setFrontendCacheHeaders(w http.ResponseWriter, urlPath, diskPath string) {
 	ext := strings.ToLower(filepath.Ext(diskPath))
-	if ext == ".html" || strings.HasPrefix(urlPath, "/app/") {
+	if ext == ".html" {
 		w.Header().Set("Cache-Control", "no-store")
+		return
+	}
+	if strings.HasPrefix(urlPath, "/app/") || strings.HasPrefix(urlPath, "/assets/") || ext == ".css" || ext == ".js" || ext == ".png" || ext == ".svg" || ext == ".webp" {
+		w.Header().Set("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400")
 		return
 	}
 	if strings.HasPrefix(urlPath, "/dashboard/") || strings.HasPrefix(urlPath, "/a/") || strings.HasPrefix(urlPath, "/d/") {
 		w.Header().Set("Cache-Control", "no-store")
 	}
+}
+
+func isLegacyConsolePath(p string) bool {
+	return p == "/d/files" || p == "/a/files" || p == "/a/audit" || p == "/a/settings" ||
+		strings.HasPrefix(p, "/dashboard/files") || strings.HasPrefix(p, "/dashboard/admin/files") ||
+		strings.HasPrefix(p, "/dashboard/admin/audit") || strings.HasPrefix(p, "/dashboard/admin/settings")
+}
+
+func legacyConsoleTarget(p string) string {
+	switch {
+	case p == "/d/files" || strings.HasPrefix(p, "/dashboard/files"):
+		return "/dashboard#files"
+	case p == "/a/files" || strings.HasPrefix(p, "/dashboard/admin/files"):
+		return "/dashboard#admin-files"
+	case p == "/a/audit" || strings.HasPrefix(p, "/dashboard/admin/audit"):
+		return "/dashboard#audit"
+	case p == "/a/settings" || strings.HasPrefix(p, "/dashboard/admin/settings"):
+		return "/dashboard#settings"
+	default:
+		return "/dashboard"
+	}
+}
+
+func (a *App) redirectLegacyUploadResult(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	if code != "" {
+		http.Redirect(w, r, "/download?code="+url.QueryEscape(code), http.StatusFound)
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/uploads"), "/")
+	if id != "" {
+		http.Redirect(w, r, "/download?upload="+url.QueryEscape(id), http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func shortDashboardPath(clean string) string {
@@ -892,6 +1516,103 @@ func limit(r *http.Request, def int) int {
 		return 500
 	}
 	return n
+}
+
+func cleanIDs(in []string, max int) []string {
+	if max <= 0 {
+		max = 100
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+func (a *App) publicBaseURL(r *http.Request) string {
+	cfg := a.snapshotConfig()
+	base := strings.TrimRight(cfg.App.BaseURL, "/")
+	if base == "" || isLocalBaseURL(base) {
+		return requestOrigin(r)
+	}
+	return base
+}
+
+func requestOrigin(r *http.Request) string {
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		if r.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	host = strings.TrimSpace(strings.Split(host, ",")[0])
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return strings.TrimRight(proto+"://"+host, "/")
+}
+
+func isLocalBaseURL(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.Contains(value, "://127.0.0.1") || strings.Contains(value, "://localhost")
+}
+
+func normalizeRegionPolicy(value string) string {
+	value = strings.TrimSpace(value)
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 {
+		return "global"
+	}
+	mode := strings.ToLower(strings.TrimSpace(parts[0]))
+	if mode != "allow" && mode != "deny" {
+		return "global"
+	}
+	codes := cleanRegionCodes(parts[1])
+	if len(codes) == 0 {
+		return "global"
+	}
+	return mode + ":" + strings.Join(codes, ",")
+}
+
+func cleanRegionCodes(value string) []string {
+	split := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '，' || r == '；' || r == ' ' || r == '\n' || r == '\t'
+	})
+	seen := map[string]bool{}
+	out := []string{}
+	for _, raw := range split {
+		code := strings.ToUpper(strings.TrimSpace(raw))
+		code = strings.Map(func(r rune) rune {
+			if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
+				return r
+			}
+			return -1
+		}, code)
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		out = append(out, code)
+		if len(out) >= 32 {
+			break
+		}
+	}
+	return out
 }
 
 func (a *App) snapshotConfig() config.Config {
@@ -953,6 +1674,7 @@ func configSettings(cfg config.Config) map[string]any {
 		"security.sessionCookieName": cfg.Security.SessionCookieName,
 		"security.sessionTtlHours":   cfg.Security.SessionTTLHours,
 		"security.cookieSecure":      cfg.Security.CookieSecure,
+		"audit.retentionDays":        cfg.Audit.RetentionDays,
 	}
 	out := map[string]any{}
 	for key, value := range values {
@@ -1011,7 +1733,7 @@ func applyConfigPatch(cfg *config.Config, body map[string]any) {
 		case "file.defaultRequireConfirm":
 			cfg.File.DefaultRequireConfirm = boolValue(value)
 		case "file.defaultRegionPolicy":
-			cfg.File.DefaultRegionPolicy = stringValue(value)
+			cfg.File.DefaultRegionPolicy = normalizeRegionPolicy(stringValue(value))
 		case "file.defaultHotlinkPolicy":
 			cfg.File.DefaultHotlinkPolicy = stringValue(value)
 		case "storage.mode":
@@ -1040,6 +1762,10 @@ func applyConfigPatch(cfg *config.Config, body map[string]any) {
 			}
 		case "security.cookieSecure":
 			cfg.Security.CookieSecure = boolValue(value)
+		case "audit.retentionDays":
+			if n := int(floatValue(value)); n > 0 {
+				cfg.Audit.RetentionDays = n
+			}
 		}
 	}
 }

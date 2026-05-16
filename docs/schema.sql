@@ -1,6 +1,8 @@
 CREATE TABLE upload_batches (
   id TEXT PRIMARY KEY,
   owner_user_id TEXT,
+  pickup_code TEXT,
+  pickup_expires_at TEXT,
   status TEXT NOT NULL DEFAULT 'created',
   total_files INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0,
@@ -8,6 +10,8 @@ CREATE TABLE upload_batches (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX idx_upload_batches_pickup_code ON upload_batches(pickup_code);
 
 CREATE TABLE files (
   id TEXT PRIMARY KEY,
@@ -53,6 +57,32 @@ CREATE TABLE file_events (
 );
 
 CREATE INDEX idx_file_events_file ON file_events(file_id, created_at DESC);
+
+CREATE UNIQUE INDEX idx_upload_batches_pickup_code ON upload_batches(pickup_code);
+
+CREATE TABLE pickup_shares (
+  id TEXT PRIMARY KEY,
+  owner_user_id TEXT,
+  pickup_code TEXT NOT NULL UNIQUE,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_pickup_shares_owner ON pickup_shares(owner_user_id, created_at DESC);
+CREATE INDEX idx_pickup_shares_code ON pickup_shares(pickup_code);
+
+CREATE TABLE pickup_share_files (
+  share_id TEXT NOT NULL,
+  file_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (share_id, file_id),
+  FOREIGN KEY(share_id) REFERENCES pickup_shares(id),
+  FOREIGN KEY(file_id) REFERENCES files(id)
+);
+
+CREATE INDEX idx_pickup_share_files_file ON pickup_share_files(file_id);
 
 CREATE TABLE account_sessions (
   id TEXT PRIMARY KEY,

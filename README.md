@@ -1,92 +1,116 @@
 # myfiles
 
-`myfiles` is the JS.Gripe file service at `https://files.js.gripe`. It replaces the older picture/file experiments and uses account-system for identity.
+`myfiles` is a compact file-sharing service built with Go and Astro. It provides public uploads, 24-hour pickup codes, a unified account login flow, personal file management, permissioned administration, audit logs, and an OpenResty front door.
 
-Current production shape:
+The current UI uses a unified pixel style with a friendly black bear mascot. Site name, page title, SEO text, visible language, and share-facing labels are driven by site configuration and the visitor browser language instead of hard-coded bilingual text.
 
-- Backend: Go service `myfilesd`
-- Frontend: Astro static UI served by `myfilesd`
-- Style: bright pixel UI with JS.Gripe black bear assets
-- Database: SQLite metadata and audit logs
-- Storage: local disk or `tgbots` through `gateway.js.gripe/api/v1/tgbots`
-- Identity: account-system third-party login
-- Reverse proxy: OpenResty on `files.js.gripe`
+## Routes
 
-## Features
+| Route | Purpose |
+| --- | --- |
+| `/` | Public upload and pickup-code shortcut |
+| `/login` | Unified account login entry |
+| `/dashboard` | User console and permissioned admin console |
+| `/download` | Upload result, pickup-code result, and non-image download confirmation |
 
-- Anonymous upload can be enabled by policy.
-- Logged-in users manage their own files.
-- Admins can view all files, open files even when hidden/not public, edit file attributes, and soft-delete files.
-- File attributes include public access, confirmation requirement, region policy, hotlink policy, and status.
-- Public short links use `/f/{id}.{ext}` for better cache hit rates.
-- Upload and download UI show progress.
-- Settings are saved per section. Storage settings are tested before activation.
+Legacy console and upload-result paths redirect to these routes:
 
-## Main Paths
+- `/d/files` -> `/dashboard#files`
+- `/a/files` -> `/dashboard#admin-files`
+- `/a/audit` -> `/dashboard#audit`
+- `/a/settings` -> `/dashboard#settings`
+- `/uploads/{batch}` -> `/download?upload={batch}`
 
-```text
-cmd/myfilesd/                         Go entrypoint
-internal/server/                      HTTP routes and admin/API logic
-internal/files/                       file metadata model
-internal/storage/                     local and tgbots storage adapters
-internal/account/                     account-system client
-internal/audit/                       audit log writer
-frontend/                            Astro frontend
-configs/config.example.json           service config example
-configs/account.integration.example.json
-```
+## User Flow
+
+- Visitors upload from `/`.
+- Pending files can be removed before upload starts.
+- Active uploads run in a modal with real-time progress and a cancel action.
+- A successful upload creates a 24-hour pickup code and redirects to `/download?upload={batchId}`.
+- `/download` shows the pickup code, a copy-link button, and the uploaded file list.
+- Pickup links use `/download?code={pickupCode}`.
+- Pickup file access uses `/pickup/{pickupCode}/{fileId}`.
+- Non-image files use `/download?next={filePath}` as a confirmation page before download.
+- File rows use type-specific visual badges for images, video, audio, archives, code, documents, spreadsheets, and presentations.
+- Logged-in users can manage their own files, create pickup codes, and expire pickup codes early.
+
+## Dashboard
+
+`/dashboard` is the only console route. It keeps the same pixel UI, language behavior, icons, and layout rules across the overview, personal files, all files, audit logs, and settings.
+
+Permissioned views are hidden from users without access:
+
+- Personal files: visible to signed-in users.
+- All files: requires all-file read permission.
+- Audit logs: requires audit permission.
+- Site settings: requires settings write permission.
+
+Personal files and all-file management support selection and batch operations. Batch endpoints are used so the browser does not send one request per selected file.
+
+## API Highlights
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/upload` | Upload files and create a batch pickup code |
+| `GET /api/me` | Current account and permission snapshot |
+| `GET /api/files` | Current user's files |
+| `POST /api/files/batch` | Batch delete or share current user's selected files |
+| `GET /api/admin/files` | Permissioned all-file listing |
+| `POST /api/admin/files/batch` | Permissioned batch delete and policy changes |
+| `GET /api/admin/audit?limit=50&ip=` | Audit log listing with row limit and IP search |
+| `GET /api/settings` | Site settings snapshot |
+| `POST /api/settings` | Permissioned site settings update |
+
+## Settings
+
+The settings page is grouped into focused sections so long configuration does not create a single oversized form. The UI avoids raw text inputs where a constrained control is safer.
+
+Important settings:
+
+- Site name, title, SEO description, and geo text.
+- Upload policy and anonymous upload availability.
+- Default file visibility and download-confirm behavior.
+- Region policy, with one active mode only:
+  - `global`
+  - `allow:CN,US`
+  - `deny:CN,US`
+- Hotlink policy, controlled by UI options.
+- Session TTL.
+- Audit retention days.
+
+Public file links are inferred from the current request origin when an explicit base URL is not configured. The old public-domain helper text is intentionally not shown in the settings UI.
 
 ## Configuration
 
-Production config is JSON, normally:
+Production config is normally stored at:
 
 ```text
 /etc/myfiles/config.json
 ```
 
-Important fields:
+Common fields:
 
-- `app.base_url`: `https://files.js.gripe`
-- `app.public_dir`: `/opt/myfiles/frontend/dist`
-- `database.path`: `/var/lib/myfiles/myfiles.sqlite3`
-- `account.client_id`: account-system client id
-- `account.client_secret`: account-system API key/client secret
-- `account.redirect_uri`: `https://files.js.gripe/auth/account/callback`
-- `storage.mode`: `tgbots`, `local`, or `disabled`
-- `storage.upload_url`: normally `https://gateway.js.gripe/api/v1/tgbots`
-- `storage.api_key`: Telegram bot token for tgbots mode
-- `storage.chat_id`: Telegram chat/group id used for upload/fetch source
-- `security.session_ttl_hours`: browser session duration
+- `app.name`: displayed site name.
+- `app.base_url`: optional public base URL; request origin is used when empty.
+- `app.public_dir`: Astro build output directory.
+- `database.path`: SQLite metadata path.
+- `account.client_id`: unified account client id.
+- `account.client_secret`: unified account secret.
+- `account.redirect_uri`: login callback URL.
+- `storage.mode`: `local`, `tgbots`, or `disabled`.
+- `storage.upload_url`: upload endpoint for `tgbots` mode.
+- `storage.api_key`: storage API key or bot token.
+- `storage.chat_id`: storage chat/group id.
+- `file.default_region_policy`: `global`, `allow:<codes>`, or `deny:<codes>`.
+- `file.default_hotlink_policy`: `allow` or `deny`.
+- `security.session_ttl_hours`: browser session duration.
+- `audit.retention_days`: audit retention setting.
 
-Account-system registration values are documented in:
+Account-system third-party login registration values are documented in:
 
 ```text
 configs/account.integration.example.json
 ```
-
-Create a client in account-system with:
-
-- application name: `myfiles`
-- redirect URI: `https://files.js.gripe/auth/account/callback`
-- scopes: `accounts:read`, `identities:resolve`, `identities:link`
-
-## tgbots Storage
-
-`myfiles` calls the Telegram Bot API shaped path:
-
-```text
-https://gateway.js.gripe/api/v1/tgbots/bot<TOKEN>/sendDocument
-```
-
-The Go service resolves `gateway.js.gripe` locally to OpenResty, so the request stays on the VPS and OpenResty/Lua can apply local auth, limits, field conversion, and local Telegram Bot API routing.
-
-Downloads use:
-
-```text
-https://gateway.js.gripe/api/v1/tgbots/fetch?bot_token=...&file_id=...
-```
-
-The upload path is streamed with multipart `io.Pipe`; files are not fully buffered in memory before being sent to tgbots.
 
 ## Build
 
@@ -102,56 +126,74 @@ Backend:
 ```bash
 cd /opt/myfiles
 go test ./...
-go build -buildvcs=false -o /opt/myfiles/bin/myfilesd ./cmd/myfilesd
+go build -o /opt/myfiles/bin/myfilesd ./cmd/myfilesd
 ```
 
 ## Deploy
 
-Production service:
+Service checks:
 
 ```bash
 systemctl status myfiles.service
+systemctl status openresty
 journalctl -u myfiles.service -f
 ```
 
-After backend changes:
+After code changes:
 
 ```bash
-go build -buildvcs=false -o /tmp/myfilesd ./cmd/myfilesd
-sudo install -m 0755 -o myfiles -g myfiles /tmp/myfilesd /opt/myfiles/bin/myfilesd
-sudo systemctl restart myfiles.service
+cd /opt/myfiles
+go test ./...
+go build -o /opt/myfiles/bin/myfilesd ./cmd/myfilesd
+systemctl restart myfiles.service
 ```
 
-The service writes `/etc/myfiles/config.json` from the admin settings page. With `ProtectSystem=full`, systemd must allow:
+After frontend-only changes:
 
-```text
-ReadWritePaths=/var/lib/myfiles /etc/myfiles
+```bash
+cd /opt/myfiles/frontend
+npm run build
+systemctl restart myfiles.service
 ```
 
-The config directory should be writable by group `myfiles`.
+OpenResty should stay on the newest package available from the configured OpenResty repository:
+
+```bash
+openresty -v
+openresty -t
+systemctl is-enabled openresty
+systemctl is-active openresty
+systemctl reload openresty
+```
+
+The current deployment was checked against the packaged OpenResty `1.29.2.3` line.
+
+## Caching
+
+The Go service serves dynamic HTML and API responses with private/no-store behavior where appropriate. Versioned browser scripts, generated icons, mascot images, and hashed Astro assets can be cached publicly to reduce origin pressure.
+
+The OpenResty snippet in `deploy/openresty/files.js.gripe.snippet.conf` keeps account callback token query strings out of access logs and forwards traffic to the local `myfilesd` service.
 
 ## Verification
+
+Health check through the public host:
 
 ```bash
 curl https://files.js.gripe/healthz
 ```
 
-For origin-local checks:
+Origin-local checks:
 
 ```bash
 curl -k --resolve files.js.gripe:443:127.0.0.1 https://files.js.gripe/healthz
-```
-
-Check tgbots gateway:
-
-```bash
-curl -k --resolve gateway.js.gripe:443:127.0.0.1 https://gateway.js.gripe/api/v1/tgbots/healthz
+curl -k --resolve files.js.gripe:443:127.0.0.1 https://files.js.gripe/dashboard
+curl -k --resolve files.js.gripe:443:127.0.0.1 https://files.js.gripe/download
 ```
 
 ## Security Notes
 
 - `myfiles_session` is HTTP-only and stored server-side as a hash.
-- Account-system `account_session` is used only during callback validation.
-- `/auth/account/callback` should not be logged by OpenResty because it receives the account session token.
-- Admin actions write audit logs.
-- HTML and `/app/*.js` are served `no-store`; built CSS/JS assets use versioned or hashed URLs.
+- Account callback tokens are not logged by the OpenResty access log format.
+- Admin actions write audit entries with actor, target, IP address, user agent, and detail payload.
+- Non-image downloads require explicit confirmation unless opened through an external storage redirect.
+- All-file management, audit logs, and settings remain permission gated in both UI and API routes.

@@ -11,9 +11,13 @@ All JSON errors use:
 - `GET /api/bootstrap`
 - `POST /api/upload`
 - `GET /api/uploads/{batchId}`
+- `GET /api/pickup/{pickupCode}`
+- `GET /pickup/{pickupCode}/{fileId}`
 - `GET /file/{id}`
 - `GET /file/{id}/info`
 - `POST /file/{id}/confirm`
+
+Non-image files served from local storage or tgbots show a download confirmation page first. Use `?download=1` after user confirmation to stream the file as an attachment. External storage links are redirected without this confirmation page.
 
 ## Account
 
@@ -26,6 +30,8 @@ All JSON errors use:
 
 - `GET /api/files?q=`
 - `GET /api/files/{id}`
+- `POST /api/files/{id}/share`
+- `DELETE /api/shares/{pickupCode}`
 - `DELETE /api/files/{id}`
 
 ## Admin

@@ -3,7 +3,44 @@ package db
 import "database/sql"
 
 func Migrate(conn *sql.DB) error {
-	_, err := conn.Exec(schema)
+	if _, err := conn.Exec(schema); err != nil {
+		return err
+	}
+	return ensurePickupColumns(conn)
+}
+
+func ensurePickupColumns(conn *sql.DB) error {
+	rows, err := conn.Query(`PRAGMA table_info(upload_batches)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !cols["pickup_code"] {
+		if _, err := conn.Exec(`ALTER TABLE upload_batches ADD COLUMN pickup_code TEXT`); err != nil {
+			return err
+		}
+	}
+	if !cols["pickup_expires_at"] {
+		if _, err := conn.Exec(`ALTER TABLE upload_batches ADD COLUMN pickup_expires_at TEXT`); err != nil {
+			return err
+		}
+	}
+	_, err = conn.Exec(pickupShareSchema)
 	return err
 }
 
@@ -11,6 +48,8 @@ const schema = `
 CREATE TABLE IF NOT EXISTS upload_batches (
   id TEXT PRIMARY KEY,
   owner_user_id TEXT,
+  pickup_code TEXT,
+  pickup_expires_at TEXT,
   status TEXT NOT NULL DEFAULT 'created',
   total_files INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0,
@@ -104,4 +143,30 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_account_user_id, created_at DESC);
+`
+
+const pickupShareSchema = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_batches_pickup_code ON upload_batches(pickup_code);
+
+CREATE TABLE IF NOT EXISTS pickup_shares (
+  id TEXT PRIMARY KEY,
+  owner_user_id TEXT,
+  pickup_code TEXT NOT NULL UNIQUE,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pickup_shares_owner ON pickup_shares(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pickup_shares_code ON pickup_shares(pickup_code);
+
+CREATE TABLE IF NOT EXISTS pickup_share_files (
+  share_id TEXT NOT NULL,
+  file_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (share_id, file_id),
+  FOREIGN KEY(share_id) REFERENCES pickup_shares(id),
+  FOREIGN KEY(file_id) REFERENCES files(id)
+);
+CREATE INDEX IF NOT EXISTS idx_pickup_share_files_file ON pickup_share_files(file_id);
 `

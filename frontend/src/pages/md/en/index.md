@@ -1,6 +1,6 @@
 # myfiles
 
-`myfiles` is the JS.Gripe file service for `files.js.gripe`.
+`myfiles` is a file service with temporary pickup codes.
 
 Core capabilities:
 

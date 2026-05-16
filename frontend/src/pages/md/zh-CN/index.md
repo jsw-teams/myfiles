@@ -1,6 +1,6 @@
 # myfiles
 
-`myfiles` 是 JS.Gripe 文件服务，部署域名为 `files.js.gripe`。
+`myfiles` 是支持临时取件码的文件服务。
 
 核心能力：
 
