@@ -127,6 +127,10 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.handleAdminStorageTest(w, r)
 	case p == "/download":
 		a.handleDownloadPage(w, r)
+	case strings.HasPrefix(p, "/view/"), strings.HasPrefix(p, "/preview/"), strings.HasPrefix(p, "/embed/"):
+		a.handlePublicPreview(w, r)
+	case strings.HasPrefix(p, "/og/"):
+		a.handlePublicOGImage(w, r)
 	case strings.HasPrefix(p, "/file/"), strings.HasPrefix(p, "/f/"):
 		a.handlePublicFile(w, r)
 	case strings.HasPrefix(p, "/pickup/"):
@@ -790,7 +794,7 @@ func (a *App) serveStoredFile(w http.ResponseWriter, r *http.Request, f myfiles.
 }
 
 func (a *App) needsDownloadConfirm(r *http.Request, f myfiles.File) bool {
-	if r.Method == http.MethodHead || r.URL.Query().Get("download") == "1" || strings.HasPrefix(f.MIME, "image/") {
+	if r.Method == http.MethodHead || r.URL.Query().Get("download") == "1" || r.URL.Query().Get("inline") == "1" || strings.HasPrefix(f.MIME, "image/") {
 		return false
 	}
 	if f.StorageProvider != "local" && f.StorageProvider != "tgbots" && f.StorageURL != "" {
@@ -1318,6 +1322,223 @@ func (a *App) handlePublicFile(w http.ResponseWriter, r *http.Request) {
 	a.serveStoredFile(w, r, f, true)
 }
 
+func (a *App) handlePublicPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	prefix := "/view/"
+	embed := false
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/preview/"):
+		prefix = "/preview/"
+	case strings.HasPrefix(r.URL.Path, "/embed/"):
+		prefix = "/embed/"
+		embed = true
+	}
+	id := publicFileID(strings.TrimPrefix(r.URL.Path, prefix))
+	f, err := myfiles.GetFile(a.db, id, false)
+	if err != nil || !f.IsPublic || f.Status != "active" || !isPreviewableMedia(f.MIME) {
+		http.NotFound(w, r)
+		return
+	}
+	if f.RequireConfirm {
+		if c, err := r.Cookie("myfiles_file_confirm_" + id); err != nil || c.Value != "1" {
+			writeError(w, 451, "confirmation_required", "访问该文件前需要确认", map[string]any{"confirmPath": publicFilePath(id, f.OriginalName) + "/confirm"})
+			return
+		}
+	}
+	a.publicPreviewHTML(w, r, f, embed)
+}
+
+func isPreviewableMedia(mime string) bool {
+	return strings.HasPrefix(mime, "image/") || strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "audio/")
+}
+
+func mediaKind(mime string) string {
+	switch {
+	case strings.HasPrefix(mime, "image/"):
+		return "image"
+	case strings.HasPrefix(mime, "video/"):
+		return "video"
+	case strings.HasPrefix(mime, "audio/"):
+		return "audio"
+	default:
+		return "file"
+	}
+}
+
+func publicPreviewPath(id, name string) string {
+	return "/view/" + strings.TrimPrefix(publicFilePath(id, name), "/f/")
+}
+
+func publicEmbedPath(id, name string) string {
+	return "/embed/" + strings.TrimPrefix(publicFilePath(id, name), "/f/")
+}
+
+func inlineMediaPath(id, name string) string {
+	return publicFilePath(id, name) + "?inline=1"
+}
+
+func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File, embed bool) {
+	kind := mediaKind(f.MIME)
+	origin := requestOrigin(r)
+	mediaURL := inlineMediaPath(f.ID, f.OriginalName)
+	absMediaURL := origin + mediaURL
+	previewURL := origin + publicPreviewPath(f.ID, f.OriginalName)
+	embedURL := origin + publicEmbedPath(f.ID, f.OriginalName)
+	title := f.OriginalName
+	if title == "" {
+		title = f.ID
+	}
+	description := fmt.Sprintf("%s · %s · %s", f.MIME, formatBytes(f.Size), "myfiles media preview")
+	robots := "index,follow"
+	if f.RequireConfirm {
+		robots = "noindex,nofollow"
+	}
+	if embed {
+		robots = "noindex,follow"
+	}
+	ogType := "website"
+	if kind == "image" {
+		ogType = "image"
+	}
+	if kind == "video" {
+		ogType = "video.other"
+	}
+
+	var media strings.Builder
+	switch kind {
+	case "image":
+		fmt.Fprintf(&media, `<img src="%s" alt="%s" loading="eager">`, html.EscapeString(mediaURL), html.EscapeString(title))
+	case "video":
+		fmt.Fprintf(&media, `<video controls playsinline preload="metadata" poster="%s"><source src="%s" type="%s"></video>`, html.EscapeString(r.URL.Query().Get("poster")), html.EscapeString(mediaURL), html.EscapeString(f.MIME))
+	case "audio":
+		fmt.Fprintf(&media, `<div class="audio-card"><strong>%s</strong><audio controls preload="metadata"><source src="%s" type="%s"></audio></div>`, html.EscapeString(title), html.EscapeString(mediaURL), html.EscapeString(f.MIME))
+	}
+
+	var extraMeta strings.Builder
+	if kind == "image" {
+		fmt.Fprintf(&extraMeta, `<meta property="og:image" content="%s">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(absMediaURL))
+	}
+	if kind == "video" {
+		ogImage := origin + publicOGImagePath(f.ID, f.OriginalName)
+		if poster := strings.TrimSpace(r.URL.Query().Get("poster")); poster != "" {
+			if strings.HasPrefix(poster, "https://") || strings.HasPrefix(poster, "http://") {
+				ogImage = poster
+			} else if strings.HasPrefix(poster, "/") {
+				ogImage = origin + poster
+			}
+		}
+		fmt.Fprintf(&extraMeta, `<meta property="og:video" content="%s">
+<meta property="og:video:secure_url" content="%s">
+<meta property="og:video:type" content="%s">
+<meta property="og:image" content="%s">
+<meta name="twitter:card" content="player">
+<meta name="twitter:player" content="%s">
+<meta name="twitter:player:width" content="1280">
+<meta name="twitter:player:height" content="720">
+<meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(absMediaURL), html.EscapeString(f.MIME), html.EscapeString(ogImage), html.EscapeString(embedURL), html.EscapeString(ogImage))
+	}
+	if kind == "audio" {
+		ogImage := origin + publicOGImagePath(f.ID, f.OriginalName)
+		fmt.Fprintf(&extraMeta, `<meta property="og:audio" content="%s">
+<meta property="og:audio:type" content="%s">
+<meta property="og:image" content="%s">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(f.MIME), html.EscapeString(ogImage), html.EscapeString(ogImage))
+	}
+
+	bodyClass := "preview"
+	if embed {
+		bodyClass = "embed"
+	}
+	downloadURL := publicFilePath(f.ID, f.OriginalName) + "?download=1"
+	chrome := ""
+	if !embed {
+		chrome = fmt.Sprintf(`<header><div><span>myfiles</span><h1>%s</h1><p>%s</p></div><nav><a href="%s">Download</a><a href="%s">Embed</a></nav></header>`, html.EscapeString(title), html.EscapeString(description), html.EscapeString(downloadURL), html.EscapeString(publicEmbedPath(f.ID, f.OriginalName)))
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if embed {
+		w.Header().Set("Cache-Control", "public, max-age=300, stale-while-revalidate=86400")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=300, stale-while-revalidate=86400")
+	}
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="%s">
+<title>%s</title>
+<meta name="description" content="%s">
+<link rel="canonical" href="%s">
+<meta property="og:type" content="%s">
+<meta property="og:title" content="%s">
+<meta property="og:description" content="%s">
+<meta property="og:url" content="%s">
+<meta property="og:site_name" content="myfiles">
+%s
+<style>
+*{box-sizing:border-box}html,body{margin:0;min-height:100%%;background:#0f1115;color:#f7f3e8;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body.preview{min-height:100vh;display:grid;grid-template-rows:auto 1fr;background:#11151b}header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 24px;border-bottom:1px solid rgba(255,255,255,.12);background:#171c23}header div{min-width:0}span{display:block;color:#9eb5c7;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}h1{margin:4px 0 6px;font-size:clamp(20px,3vw,34px);line-height:1.15;overflow-wrap:anywhere}p{margin:0;color:#bec8d2;font-size:14px}nav{display:flex;gap:10px;flex-wrap:wrap}a{border:1px solid rgba(255,255,255,.28);border-radius:6px;color:#f7f3e8;text-decoration:none;padding:9px 12px;font-weight:800}.stage{width:100%%;min-height:0;display:grid;place-items:center;padding:20px}.embed .stage{height:100vh;padding:0}img,video{display:block;max-width:100%%;max-height:calc(100vh - 132px);background:#06080b}video{width:min(100%%,1280px);aspect-ratio:16/9}.embed video,.embed img{width:100%%;height:100vh;max-height:none;object-fit:contain}.audio-card{width:min(720px,calc(100%% - 32px));display:grid;gap:16px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#171c23;padding:20px}.audio-card strong{overflow-wrap:anywhere}.audio-card audio{width:100%%}@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.stage{padding:12px}img,video{max-height:calc(100vh - 188px)}}
+</style>
+</head>
+<body class="%s">
+%s
+<main class="stage">%s</main>
+</body>
+</html>`, html.EscapeString(robots), html.EscapeString(title), html.EscapeString(description), html.EscapeString(previewURL), html.EscapeString(ogType), html.EscapeString(title), html.EscapeString(description), html.EscapeString(previewURL), extraMeta.String(), html.EscapeString(bodyClass), chrome, media.String())
+}
+
+func publicOGImagePath(id, name string) string {
+	return "/og/" + strings.TrimPrefix(publicFilePath(id, name), "/f/") + ".svg"
+}
+
+func (a *App) handlePublicOGImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/og/")
+	rest = strings.TrimSuffix(rest, ".svg")
+	id := publicFileID(rest)
+	f, err := myfiles.GetFile(a.db, id, false)
+	if err != nil || !f.IsPublic || f.Status != "active" || !isPreviewableMedia(f.MIME) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
+	title := f.OriginalName
+	if title == "" {
+		title = f.ID
+	}
+	kind := strings.ToUpper(mediaKind(f.MIME))
+	fmt.Fprintf(w, `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+<rect width="1200" height="630" fill="#11151b"/>
+<rect x="56" y="56" width="1088" height="518" rx="22" fill="#171c23" stroke="#34404f" stroke-width="2"/>
+<text x="92" y="142" fill="#9eb5c7" font-family="system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="28" font-weight="800">MYFILES %s</text>
+<text x="92" y="278" fill="#f7f3e8" font-family="system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="58" font-weight="800">%s</text>
+<text x="92" y="356" fill="#bec8d2" font-family="system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="30">%s · %s</text>
+<circle cx="1010" cy="318" r="78" fill="#ffd44d"/>
+<path d="M982 270 L1064 318 L982 366 Z" fill="#11151b"/>
+</svg>`, html.EscapeString(kind), html.EscapeString(svgLine(title, 30)), html.EscapeString(f.MIME), html.EscapeString(formatBytes(f.Size)))
+}
+
+func svgLine(value string, maxRunes int) string {
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	if maxRunes <= 1 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
 func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles.File) {
 	cfg := a.snapshotConfig()
 	if !storage.ValidBotToken(cfg.Storage.APIKey) {
@@ -1366,6 +1587,7 @@ func (a *App) handlePublicFileInfo(w http.ResponseWriter, r *http.Request, id st
 	writeJSON(w, 200, map[string]any{"ok": true, "file": map[string]any{
 		"id": f.ID, "name": f.OriginalName, "mime": f.MIME, "size": f.Size, "sha256": f.SHA256,
 		"imageWidth": f.ImageWidth, "imageHeight": f.ImageHeight, "requireConfirm": f.RequireConfirm, "url": publicFilePath(f.ID, f.OriginalName),
+		"previewUrl": publicPreviewPath(f.ID, f.OriginalName), "embedUrl": publicEmbedPath(f.ID, f.OriginalName),
 	}})
 }
 
