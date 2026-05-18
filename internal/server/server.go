@@ -1412,7 +1412,11 @@ func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfile
 	case "image":
 		fmt.Fprintf(&media, `<img src="%s" alt="%s" loading="eager">`, html.EscapeString(mediaURL), html.EscapeString(title))
 	case "video":
-		fmt.Fprintf(&media, `<video controls playsinline preload="metadata" poster="%s"><source src="%s" type="%s"></video>`, html.EscapeString(r.URL.Query().Get("poster")), html.EscapeString(mediaURL), html.EscapeString(f.MIME))
+		poster := strings.TrimSpace(r.URL.Query().Get("poster"))
+		if poster == "" {
+			poster = publicOGImagePath(f.ID, f.OriginalName)
+		}
+		fmt.Fprintf(&media, `<video controls playsinline preload="none" poster="%s"><source src="%s" type="%s"></video>`, html.EscapeString(poster), html.EscapeString(mediaURL), html.EscapeString(f.MIME))
 	case "audio":
 		fmt.Fprintf(&media, `<div class="audio-card"><strong>%s</strong><audio controls preload="metadata"><source src="%s" type="%s"></audio></div>`, html.EscapeString(title), html.EscapeString(mediaURL), html.EscapeString(f.MIME))
 	}
@@ -1550,6 +1554,9 @@ func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles
 		writeError(w, 500, "storage_fetch_failed", "创建回源请求失败", nil)
 		return
 	}
+	if r.Header.Get("Range") != "" {
+		req.Header.Set("Range", r.Header.Get("Range"))
+	}
 	resp, err := storage.NewTGBotsHTTPClient(cfg.Storage).Do(req)
 	if err != nil {
 		writeError(w, 502, "storage_fetch_failed", "存储回源失败", nil)
@@ -1562,16 +1569,32 @@ func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles
 	}
 	w.Header().Set("Content-Type", f.MIME)
 	w.Header().Set("Content-Disposition", contentDisposition(r, f))
-	if resp.Header.Get("Content-Length") != "" {
-		w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
-	}
+	copyResponseHeader(w, resp, "Accept-Ranges")
+	copyResponseHeader(w, resp, "Content-Length")
+	copyResponseHeader(w, resp, "Content-Range")
+	copyResponseHeader(w, resp, "ETag")
+	copyResponseHeader(w, resp, "Last-Modified")
 	if f.IsPublic {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
 		w.Header().Set("Cache-Control", "private, max-age=0, no-store")
 	}
+	status := resp.StatusCode
+	if status < 200 || status >= 400 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	if r.Method == http.MethodHead {
+		return
+	}
 	buf := make([]byte, 256*1024)
 	_, _ = io.CopyBuffer(w, resp.Body, buf)
+}
+
+func copyResponseHeader(w http.ResponseWriter, resp *http.Response, name string) {
+	if value := resp.Header.Get(name); value != "" {
+		w.Header().Set(name, value)
+	}
 }
 
 func (a *App) handlePublicFileInfo(w http.ResponseWriter, r *http.Request, id string) {
