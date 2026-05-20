@@ -250,6 +250,13 @@
     });
   }
 
+  function needsReloadForDisabledPlugins(gatedPlugins, choices) {
+    return gatedPlugins.some((plugin) => {
+      if (choices[categoryOf(plugin)] === true) return false;
+      return Boolean(document.querySelector(`script[data-privacy-plugin="${plugin.id}"]`));
+    });
+  }
+
   function renderSettingsButton(config, context) {
     if (document.querySelector("[data-privacy-settings]")) return;
     loadStylesheet();
@@ -281,7 +288,9 @@
 
     const panel = document.createElement("div");
     panel.className = "privacy-plugin-panel";
-    panel.append(text("h2", copy.preferences, "privacy-plugin-title")).id = "privacy-plugin-title";
+    const title = text("h2", copy.preferences, "privacy-plugin-title");
+    title.id = "privacy-plugin-title";
+    panel.append(title);
     panel.append(text("p", context.globalOptOut ? copy.gpc : copy.bannerMessage, "privacy-plugin-lede"));
     const profile = regionProfile(context.country);
     const notice = copy.jurisdictionNotice?.[profile] || copy.jurisdictionNotice?.default;
@@ -337,6 +346,10 @@
       if (action === "accept" && !context.globalOptOut) categories.forEach((category) => { choices[category] = true; });
       const consent = saveConsent(action === "accept" ? "accepted" : action === "reject" ? "rejected" : "custom", choices, context.country);
       overlay.remove();
+      if (needsReloadForDisabledPlugins(context.gatedPlugins, choices)) {
+        window.location.reload();
+        return;
+      }
       applyConsent(context.plugins, context.gatedPlugins, consent);
       renderSettingsButton(config, context);
     });
@@ -386,6 +399,10 @@
       });
       const consent = saveConsent(action === "accept" && !context.globalOptOut ? "accepted" : "rejected", choices, context.country);
       banner.remove();
+      if (needsReloadForDisabledPlugins(context.gatedPlugins, choices)) {
+        window.location.reload();
+        return;
+      }
       applyConsent(context.plugins, context.gatedPlugins, consent);
       renderSettingsButton(config, context);
     });
