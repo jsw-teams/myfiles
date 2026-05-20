@@ -1,57 +1,184 @@
+.privacy-plugin-banner,
+.privacy-plugin-overlay,
+.privacy-plugin-settings {
+  color: #172033;
+  font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
 .privacy-plugin-banner {
   position: fixed;
   right: 16px;
   bottom: 16px;
   left: 16px;
   z-index: 2147483000;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
   align-items: center;
-  justify-content: space-between;
-  max-width: 720px;
+  max-width: 980px;
   margin: 0 auto;
-  padding: 14px 16px;
-  border: 1px solid rgba(15, 23, 42, 0.16);
+  padding: 16px;
+  border: 1px solid rgba(15, 23, 42, 0.18);
   border-radius: 8px;
   background: #fff;
-  color: #172033;
   box-shadow: 0 18px 44px rgba(15, 23, 42, 0.18);
-  font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-.privacy-plugin-banner p {
+.privacy-plugin-banner-content {
+  display: grid;
+  gap: 6px;
+}
+
+.privacy-plugin-banner strong,
+.privacy-plugin-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 750;
+  line-height: 1.25;
+}
+
+.privacy-plugin-banner p,
+.privacy-plugin-banner small,
+.privacy-plugin-lede,
+.privacy-plugin-notice {
   margin: 0;
 }
 
-.privacy-plugin-banner div {
-  display: flex;
-  gap: 8px;
-  flex: 0 0 auto;
+.privacy-plugin-banner small,
+.privacy-plugin-notice,
+.privacy-plugin-category small {
+  color: #4b5563;
+  font-size: 12px;
 }
 
-.privacy-plugin-banner button {
-  min-height: 36px;
+.privacy-plugin-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.privacy-plugin-actions button,
+.privacy-plugin-settings,
+.privacy-plugin-panel > button[data-privacy-action="close"] {
+  min-height: 40px;
   border: 1px solid #172033;
   border-radius: 6px;
-  padding: 0 12px;
-  background: #172033;
-  color: #fff;
-  font: 600 14px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 0 14px;
+  background: #fff;
+  color: #172033;
+  font: 700 14px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
-.privacy-plugin-banner button[data-privacy-choice="decline"] {
-  background: #fff;
-  color: #172033;
+.privacy-plugin-actions button[data-variant="primary"] {
+  background: #172033;
+  color: #fff;
 }
 
-@media (max-width: 640px) {
+.privacy-plugin-actions button:focus-visible,
+.privacy-plugin-settings:focus-visible,
+.privacy-plugin-panel > button[data-privacy-action="close"]:focus-visible {
+  outline: 3px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+.privacy-plugin-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483001;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.46);
+}
+
+.privacy-plugin-panel {
+  display: grid;
+  gap: 14px;
+  width: min(760px, 100%);
+  max-height: min(720px, calc(100vh - 36px));
+  overflow: auto;
+  padding: 20px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.32);
+}
+
+.privacy-plugin-categories {
+  display: grid;
+  gap: 10px;
+}
+
+.privacy-plugin-category {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.privacy-plugin-category input {
+  width: 20px;
+  height: 20px;
+  margin: 2px 0 0;
+  accent-color: #172033;
+}
+
+.privacy-plugin-category span {
+  display: grid;
+  gap: 4px;
+}
+
+.privacy-plugin-category strong {
+  font-size: 15px;
+}
+
+.privacy-plugin-category em {
+  color: #4b5563;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.privacy-plugin-settings {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147482999;
+  min-height: 36px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.16);
+}
+
+.privacy-plugin-panel > button[data-privacy-action="close"] {
+  justify-self: start;
+  border-color: transparent;
+  padding-inline: 0;
+  color: #4b5563;
+}
+
+@media (max-width: 720px) {
   .privacy-plugin-banner {
-    align-items: stretch;
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
-  .privacy-plugin-banner div {
-    justify-content: flex-end;
+  .privacy-plugin-actions {
+    justify-content: stretch;
+  }
+
+  .privacy-plugin-actions button {
+    flex: 1 1 120px;
+  }
+
+  .privacy-plugin-category {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .privacy-plugin-category em {
+    grid-column: 2;
   }
 }
