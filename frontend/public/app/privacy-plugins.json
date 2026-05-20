@@ -1,5 +1,8 @@
 {
   "version": 1,
+  "consent": {
+    "mode": "always-prompt"
+  },
   "consentBanner": {
     "zh-CN": {
       "message": "我们使用隐私友好的分析插件了解页面访问情况。你可以选择是否启用这些非必要插件。",

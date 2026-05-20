@@ -1,7 +1,8 @@
 (() => {
   const currentScript = document.currentScript;
   const configUrl = currentScript?.dataset.config || "/privacy-plugins.json";
-  const storageKey = "privacy_plugins_consent_v1";
+  const stylesheetUrl = currentScript?.dataset.stylesheet || "/privacy-plugin-banner.css";
+  const storageKey = "privacy_plugins_consent_v2";
   const regionKey = "privacy_plugins_region_v1";
   const consentRegionCodes = new Set([
     "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
@@ -51,6 +52,16 @@
     }
   };
 
+  function loadStylesheet() {
+    if ([...document.styleSheets].some((sheet) => sheet.href && sheet.href.endsWith(stylesheetUrl))) return;
+    if (document.querySelector(`link[data-privacy-plugin-style][href="${stylesheetUrl}"]`)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = stylesheetUrl;
+    link.dataset.privacyPluginStyle = "banner";
+    document.head.append(link);
+  }
+
   function hasGlobalOptOut() {
     return navigator.globalPrivacyControl === true || navigator.doNotTrack === "1" || window.doNotTrack === "1";
   }
@@ -83,12 +94,15 @@
     return "UNKNOWN";
   }
 
-  function needsConsent(country, plugin) {
+  function needsConsent(country, plugin, config) {
     const policy = plugin.policy || {};
+    const mode = policy.consentMode || config.consent?.mode || policy.mode || "region-aware";
+    if (mode === "always-prompt") return true;
+    if (mode === "never-prompt") return false;
     const explicitCountries = new Set((policy.consentCountries || []).map(normalizeCountry));
     if (explicitCountries.has(country)) return true;
     if (country === "EU" || country === "UNKNOWN") return true;
-    return policy.mode === "consent" || consentRegionCodes.has(country);
+    return mode === "consent" || consentRegionCodes.has(country);
   }
 
   function loadPlugin(plugin) {
@@ -110,6 +124,7 @@
   }
 
   function showConsent(config, onChoice) {
+    loadStylesheet();
     const lang = browserLang();
     const copy = config.consentBanner?.[lang] || config.consentBanner?.en || fallbackCopy[lang] || fallbackCopy.en;
     const banner = document.createElement("section");
@@ -124,16 +139,6 @@
       </div>
     `;
 
-    const style = document.createElement("style");
-    style.textContent = `
-      .privacy-plugin-banner{position:fixed;right:16px;bottom:16px;left:16px;z-index:2147483000;display:flex;gap:14px;align-items:center;justify-content:space-between;max-width:720px;margin:0 auto;padding:14px 16px;border:1px solid rgba(15,23,42,.16);border-radius:8px;background:#fff;color:#172033;box-shadow:0 18px 44px rgba(15,23,42,.18);font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-      .privacy-plugin-banner p{margin:0}
-      .privacy-plugin-banner div{display:flex;gap:8px;flex:0 0 auto}
-      .privacy-plugin-banner button{min-height:36px;border:1px solid #172033;border-radius:6px;padding:0 12px;background:#172033;color:#fff;font:600 14px/1 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}
-      .privacy-plugin-banner button[data-privacy-choice="decline"]{background:#fff;color:#172033}
-      @media (max-width:640px){.privacy-plugin-banner{align-items:stretch;flex-direction:column}.privacy-plugin-banner div{justify-content:flex-end}}
-    `;
-    document.head.append(style);
     document.body.append(banner);
 
     banner.addEventListener("click", (event) => {
@@ -142,7 +147,6 @@
       const granted = button.dataset.privacyChoice === "accept";
       writeJson(storageKey, { granted, time: Date.now() });
       banner.remove();
-      style.remove();
       onChoice(granted);
     });
   }
@@ -154,7 +158,7 @@
     if (!plugins.length) return;
 
     const country = await detectCountry();
-    const gatedPlugins = plugins.filter((plugin) => needsConsent(country, plugin));
+    const gatedPlugins = plugins.filter((plugin) => needsConsent(country, plugin, config));
     const ungatedPlugins = plugins.filter((plugin) => !gatedPlugins.includes(plugin));
     ungatedPlugins.forEach(loadPlugin);
     if (!gatedPlugins.length) return;
