@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "consentBanner": {
+    "zh-CN": {
+      "message": "我们使用隐私友好的分析插件了解页面访问情况。你可以选择是否启用这些非必要插件。",
+      "accept": "允许",
+      "decline": "拒绝"
+    },
+    "zh-TW": {
+      "message": "我們使用隱私友善的分析插件了解頁面訪問情況。你可以選擇是否啟用這些非必要插件。",
+      "accept": "允許",
+      "decline": "拒絕"
+    },
+    "en": {
+      "message": "We use privacy-minded analytics plugins to understand page visits. You can choose whether to enable these optional plugins.",
+      "accept": "Allow",
+      "decline": "Decline"
+    }
+  },
+  "plugins": [
+    {
+      "id": "cloudflare-web-analytics",
+      "enabled": true,
+      "type": "script",
+      "src": "https://static.cloudflareinsights.com/beacon.min.js",
+      "attributes": {
+        "defer": true,
+        "data-cf-beacon": "{\"token\":\"4349c15d66d44f79b7d07f89c1e491ab\"}"
+      },
+      "policy": {
+        "category": "analytics",
+        "mode": "region-aware",
+        "honorGlobalPrivacyControl": true,
+        "consentCountries": [
+          "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
+          "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
+          "SI", "ES", "SE", "IS", "LI", "NO", "GB", "UK", "CH", "BR", "CA", "CN",
+          "HK", "MO", "TW", "ZA"
+        ]
+      }
+    }
+  ]
+}
