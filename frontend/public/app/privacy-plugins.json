@@ -8,10 +8,10 @@
       "bannerTitle": "隐私选择",
       "bannerMessage": "我们面向不同国家和地区提供服务，非必要分析插件默认关闭。你可以全部拒绝、全部接受，或按类别管理偏好。",
       "jurisdictionNotice": {
-        "eu": "欧盟/英国/瑞士等地区：非必要插件仅在同意后加载，拒绝和接受同样容易，并可随时撤回。",
-        "us": "美国部分州：我们尊重全局隐私控制信号，并提供退出共享、定向广告或非必要分析的选择。",
-        "jp": "日本：我们会说明第三方外部传送的目的、接收方和用途，并在启用第三方分析前提供选择。",
-        "default": "其他地区：我们采用更保守的全球默认设置，先征得选择，再启用非必要插件。"
+        "eu": "非必要插件仅在同意后加载，拒绝和接受同样容易，并可随时撤回。",
+        "us": "我们尊重全局隐私控制信号，并提供退出共享、定向广告或非必要分析的选择。",
+        "jp": "我们会说明第三方外部传送的目的、接收方和用途，并在启用第三方分析前提供选择。",
+        "default": "我们采用更保守的全球默认设置，先征得选择，再启用非必要插件。"
       },
       "rejectAll": "全部拒绝",
       "acceptAll": "全部接受",
@@ -34,10 +34,10 @@
       "bannerTitle": "隱私選擇",
       "bannerMessage": "我們面向不同國家和地區提供服務，非必要分析外掛預設關閉。你可以全部拒絕、全部接受，或依類別管理偏好。",
       "jurisdictionNotice": {
-        "eu": "歐盟/英國/瑞士等地區：非必要外掛僅在同意後載入，拒絕和接受同樣容易，並可隨時撤回。",
-        "us": "美國部分州：我們尊重全域隱私控制訊號，並提供退出共享、定向廣告或非必要分析的選擇。",
-        "jp": "日本：我們會說明第三方外部傳送的目的、接收方和用途，並在啟用第三方分析前提供選擇。",
-        "default": "其他地區：我們採用更保守的全球預設設定，先徵得選擇，再啟用非必要外掛。"
+        "eu": "非必要外掛僅在同意後載入，拒絕和接受同樣容易，並可隨時撤回。",
+        "us": "我們尊重全域隱私控制訊號，並提供退出共享、定向廣告或非必要分析的選擇。",
+        "jp": "我們會說明第三方外部傳送的目的、接收方和用途，並在啟用第三方分析前提供選擇。",
+        "default": "我們採用更保守的全球預設設定，先徵得選擇，再啟用非必要外掛。"
       },
       "rejectAll": "全部拒絕",
       "acceptAll": "全部接受",
@@ -60,10 +60,10 @@
       "bannerTitle": "Privacy Choices",
       "bannerMessage": "This site is available to visitors from many countries and regions, so optional analytics plugins are off by default. You can reject all, accept all, or manage preferences by category.",
       "jurisdictionNotice": {
-        "eu": "EU/UK/Swiss regions: optional plugins load only after consent, rejecting is as easy as accepting, and consent can be withdrawn at any time.",
-        "us": "Applicable US states: we honor Global Privacy Control signals and provide choices to opt out of sharing, targeted advertising, or optional analytics.",
-        "jp": "Japan: we describe third-party external transmission purposes, recipients, and use before enabling third-party analytics.",
-        "default": "Other regions: we use a conservative global default and ask before enabling optional plugins."
+        "eu": "Optional plugins load only after consent, rejecting is as easy as accepting, and consent can be withdrawn at any time.",
+        "us": "We honor Global Privacy Control signals and provide choices to opt out of sharing, targeted advertising, or optional analytics.",
+        "jp": "We describe third-party external transmission purposes, recipients, and use before enabling third-party analytics.",
+        "default": "We use a conservative global default and ask before enabling optional plugins."
       },
       "rejectAll": "Reject all",
       "acceptAll": "Accept all",

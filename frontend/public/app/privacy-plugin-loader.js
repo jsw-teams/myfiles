@@ -16,9 +16,9 @@
       bannerTitle: "隐私选择",
       bannerMessage: "我们只会在你同意后启用非必要分析插件。你可以拒绝、接受，或按类别管理偏好。",
       jurisdictionNotice: {
-        eu: "适用于欧盟/英国/瑞士访客：非必要插件默认关闭，只有在同意后才会加载，撤回同意应与同意同样容易。",
-        us: "适用于美国部分州访客：我们尊重全局隐私控制信号，并提供退出共享、定向广告或非必要分析的选择。",
-        jp: "适用于日本访客：我们会说明外部传送目的、接收方和插件用途，并在启用第三方分析前征得选择。"
+        eu: "非必要插件默认关闭，只有在同意后才会加载；拒绝和接受同样容易，并可随时撤回。",
+        us: "我们尊重全局隐私控制信号，并提供退出共享、定向广告或非必要分析的选择。",
+        jp: "我们会说明第三方外部传送目的、接收方和插件用途，并在启用第三方分析前提供选择。"
       },
       rejectAll: "全部拒绝",
       acceptAll: "全部接受",
@@ -41,9 +41,9 @@
       bannerTitle: "隱私選擇",
       bannerMessage: "我們只會在你同意後啟用非必要分析外掛。你可以拒絕、接受，或依類別管理偏好。",
       jurisdictionNotice: {
-        eu: "適用於歐盟/英國/瑞士訪客：非必要外掛預設關閉，只有在同意後才會載入，撤回同意應與同意同樣容易。",
-        us: "適用於美國部分州訪客：我們尊重全域隱私控制訊號，並提供退出共享、定向廣告或非必要分析的選擇。",
-        jp: "適用於日本訪客：我們會說明外部傳送目的、接收方和外掛用途，並在啟用第三方分析前徵得選擇。"
+        eu: "非必要外掛預設關閉，只有在同意後才會載入；拒絕和接受同樣容易，並可隨時撤回。",
+        us: "我們尊重全域隱私控制訊號，並提供退出共享、定向廣告或非必要分析的選擇。",
+        jp: "我們會說明第三方外部傳送目的、接收方和外掛用途，並在啟用第三方分析前提供選擇。"
       },
       rejectAll: "全部拒絕",
       acceptAll: "全部接受",
@@ -66,9 +66,9 @@
       bannerTitle: "Privacy Choices",
       bannerMessage: "We enable optional analytics plugins only after your choice. You can reject, accept, or manage preferences by category.",
       jurisdictionNotice: {
-        eu: "For EU/UK/Swiss visitors: optional plugins are off by default, load only after consent, and consent can be withdrawn as easily as it is given.",
-        us: "For visitors in applicable US states: we honor global privacy control signals and provide choices to opt out of sharing, targeted advertising, or optional analytics.",
-        jp: "For Japan visitors: we describe external transmission purposes, recipients, and plugin use before enabling third-party analytics."
+        eu: "Optional plugins are off by default, load only after consent, and consent can be withdrawn as easily as it is given.",
+        us: "We honor global privacy control signals and provide choices to opt out of sharing, targeted advertising, or optional analytics.",
+        jp: "We describe external transmission purposes, recipients, and plugin use before enabling third-party analytics."
       },
       rejectAll: "Reject all",
       acceptAll: "Accept all",
@@ -327,6 +327,8 @@
     overlay.addEventListener("click", (event) => {
       const action = event.target.closest("[data-privacy-action]")?.dataset.privacyAction;
       if (!action) return;
+      event.preventDefault();
+      event.stopPropagation();
       if (action === "close") {
         overlay.remove();
         return;
@@ -342,6 +344,7 @@
 
   function showBanner(config, context) {
     loadStylesheet();
+    document.querySelectorAll("[data-privacy-root]").forEach((node) => node.remove());
     const copy = copyFor(config);
     const banner = document.createElement("section");
     banner.className = "privacy-plugin-banner";
@@ -370,6 +373,8 @@
     banner.addEventListener("click", (event) => {
       const action = event.target.closest("[data-privacy-action]")?.dataset.privacyAction;
       if (!action) return;
+      event.preventDefault();
+      event.stopPropagation();
       if (action === "customize") {
         showPreferenceCenter(config, context);
         return;
