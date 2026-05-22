@@ -1,15 +1,19 @@
 {
-  "version": 2,
+  "version": 3,
+  "revision": "2026-05-20-region-aware-v7",
   "consent": {
-    "mode": "always-prompt"
+    "mode": "always-prompt",
+    "storageVersion": 4,
+    "regionStrategy": "ip-country-with-conservative-fallback",
+    "globalDefault": "prompt-before-loading-optional-plugins"
   },
   "ui": {
     "zh-CN": {
       "bannerTitle": "隐私选择",
-      "bannerMessage": "我们面向不同国家和地区提供服务，非必要分析插件默认关闭。你可以全部拒绝、全部接受，或按类别管理偏好。",
+      "bannerMessage": "我们面向不同国家和地区提供服务，非必要分析插件默认关闭。你可以全部拒绝、全部接受，或按类别管理偏好；选择会保存在本机浏览器中。",
       "jurisdictionNotice": {
         "eu": "非必要插件仅在同意后加载，拒绝和接受同样容易，并可随时撤回。",
-        "us": "我们尊重全局隐私控制信号，并提供退出共享、定向广告或非必要分析的选择。",
+        "us": "我们尊重全局隐私控制信号；本站不使用定向广告，分析插件仍提供退出选择。",
         "jp": "我们会说明第三方外部传送的目的、接收方和用途，并在启用第三方分析前提供选择。",
         "default": "我们采用更保守的全球默认设置，先征得选择，再启用非必要插件。"
       },
@@ -22,20 +26,20 @@
       "settings": "隐私设置",
       "required": "必要",
       "optional": "可选",
-      "gpc": "检测到浏览器全局隐私控制或 Do Not Track，非必要插件已保持关闭。",
+      "gpc": "检测到浏览器全局隐私控制或 Do Not Track，非必要插件默认保持关闭；你仍可以管理偏好。",
       "categories": {
         "analytics": {
           "title": "分析",
-          "description": "帮助我们了解页面访问量和站点性能，不用于广告定向。"
+          "description": "帮助我们了解页面访问量、站点性能和基础使用趋势，不用于定向广告或跨站跟踪。"
         }
       }
     },
     "zh-TW": {
       "bannerTitle": "隱私選擇",
-      "bannerMessage": "我們面向不同國家和地區提供服務，非必要分析外掛預設關閉。你可以全部拒絕、全部接受，或依類別管理偏好。",
+      "bannerMessage": "我們面向不同國家和地區提供服務，非必要分析外掛預設關閉。你可以全部拒絕、全部接受，或依類別管理偏好；選擇會保存在本機瀏覽器中。",
       "jurisdictionNotice": {
         "eu": "非必要外掛僅在同意後載入，拒絕和接受同樣容易，並可隨時撤回。",
-        "us": "我們尊重全域隱私控制訊號，並提供退出共享、定向廣告或非必要分析的選擇。",
+        "us": "我們尊重全域隱私控制訊號；本站不使用定向廣告，分析外掛仍提供退出選擇。",
         "jp": "我們會說明第三方外部傳送的目的、接收方和用途，並在啟用第三方分析前提供選擇。",
         "default": "我們採用更保守的全球預設設定，先徵得選擇，再啟用非必要外掛。"
       },
@@ -48,20 +52,20 @@
       "settings": "隱私設定",
       "required": "必要",
       "optional": "可選",
-      "gpc": "偵測到瀏覽器全域隱私控制或 Do Not Track，非必要外掛已保持關閉。",
+      "gpc": "偵測到瀏覽器全域隱私控制或 Do Not Track，非必要外掛預設保持關閉；你仍可以管理偏好。",
       "categories": {
         "analytics": {
           "title": "分析",
-          "description": "幫助我們了解頁面訪問量和網站效能，不用於廣告定向。"
+          "description": "幫助我們了解頁面訪問量、網站效能和基礎使用趨勢，不用於定向廣告或跨站追蹤。"
         }
       }
     },
     "en": {
       "bannerTitle": "Privacy Choices",
-      "bannerMessage": "This site is available to visitors from many countries and regions, so optional analytics plugins are off by default. You can reject all, accept all, or manage preferences by category.",
+      "bannerMessage": "This site is available to visitors from many countries and regions, so optional analytics plugins are off by default. You can reject all, accept all, or manage preferences by category; your choice is saved in this browser.",
       "jurisdictionNotice": {
         "eu": "Optional plugins load only after consent, rejecting is as easy as accepting, and consent can be withdrawn at any time.",
-        "us": "We honor Global Privacy Control signals and provide choices to opt out of sharing, targeted advertising, or optional analytics.",
+        "us": "We honor Global Privacy Control signals. This site does not use targeted advertising, and optional analytics can still be declined.",
         "jp": "We describe third-party external transmission purposes, recipients, and use before enabling third-party analytics.",
         "default": "We use a conservative global default and ask before enabling optional plugins."
       },
@@ -74,11 +78,11 @@
       "settings": "Privacy settings",
       "required": "Required",
       "optional": "Optional",
-      "gpc": "A browser Global Privacy Control or Do Not Track signal was detected, so optional plugins remain off.",
+      "gpc": "A browser Global Privacy Control or Do Not Track signal was detected, so optional plugins start off by default; you can still manage preferences.",
       "categories": {
         "analytics": {
           "title": "Analytics",
-          "description": "Helps us understand page visits and site performance. It is not used for targeted advertising."
+          "description": "Helps us understand page visits, site performance, and basic usage trends. It is not used for targeted advertising or cross-site tracking."
         }
       }
     }
@@ -94,7 +98,7 @@
         "defer": true,
         "data-cf-beacon": "{\"token\":\"4349c15d66d44f79b7d07f89c1e491ab\"}"
       },
-      "disclosure": "Cloudflare Web Analytics: used to measure page visits and performance. Provider: Cloudflare. Category: analytics. Non-essential and loaded only after consent. Not used for targeted advertising.",
+      "disclosure": "Cloudflare Web Analytics: used to measure page visits, performance, and basic usage trends. Provider: Cloudflare. Category: analytics. Non-essential and loaded only after consent. Not used for targeted advertising or cross-site tracking.",
       "policy": {
         "category": "analytics",
         "mode": "region-aware",

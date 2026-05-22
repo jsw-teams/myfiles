@@ -1,14 +1,21 @@
 .privacy-plugin-banner,
 .privacy-plugin-overlay,
 .privacy-plugin-settings {
+  box-sizing: border-box;
   color: #172033;
   font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.privacy-plugin-banner *,
+.privacy-plugin-overlay *,
+.privacy-plugin-settings * {
+  box-sizing: border-box;
 }
 
 .privacy-plugin-banner {
   position: fixed;
   right: 16px;
-  bottom: 16px;
+  bottom: var(--privacy-plugin-banner-bottom, 16px);
   left: 16px;
   z-index: 2147483000;
   display: grid;
@@ -77,9 +84,15 @@
   color: #fff;
 }
 
+.privacy-plugin-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .privacy-plugin-actions button:focus-visible,
 .privacy-plugin-settings:focus-visible,
-.privacy-plugin-panel > button[data-privacy-action="close"]:focus-visible {
+.privacy-plugin-panel > button[data-privacy-action="close"]:focus-visible,
+.privacy-plugin-category:focus-within {
   outline: 3px solid #93c5fd;
   outline-offset: 2px;
 }
@@ -144,10 +157,21 @@
   font-weight: 700;
 }
 
+.privacy-plugin-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .privacy-plugin-settings {
   position: fixed;
   right: 16px;
-  bottom: 16px;
+  bottom: var(--privacy-plugin-settings-bottom, var(--privacy-plugin-banner-bottom, 16px));
   z-index: 2147482999;
   min-height: 36px;
   background: #fff;

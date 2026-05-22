@@ -2,8 +2,10 @@
   const currentScript = document.currentScript;
   const configUrl = currentScript?.dataset.config || "/privacy-plugins.json";
   const stylesheetUrl = currentScript?.dataset.stylesheet || "/privacy-plugin-banner.css";
-  const storageKey = "privacy_plugins_consent_v3";
+  const storageKey = "privacy_plugins_consent_v4";
+  const legacyStorageKeys = ["privacy_plugins_consent_v3"];
   const regionKey = "privacy_plugins_region_v1";
+  const globalStateKey = "__jsGripePrivacyPlugins";
   const consentRegionCodes = new Set([
     "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
     "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
@@ -29,7 +31,7 @@
       settings: "隐私设置",
       required: "必要",
       optional: "可选",
-      gpc: "检测到浏览器全局隐私控制或 Do Not Track，非必要插件已保持关闭。",
+      gpc: "检测到浏览器全局隐私控制或 Do Not Track，非必要插件默认保持关闭；你仍可以管理偏好。",
       categories: {
         analytics: {
           title: "分析",
@@ -54,7 +56,7 @@
       settings: "隱私設定",
       required: "必要",
       optional: "可選",
-      gpc: "偵測到瀏覽器全域隱私控制或 Do Not Track，非必要外掛已保持關閉。",
+      gpc: "偵測到瀏覽器全域隱私控制或 Do Not Track，非必要外掛預設保持關閉；你仍可以管理偏好。",
       categories: {
         analytics: {
           title: "分析",
@@ -79,7 +81,7 @@
       settings: "Privacy settings",
       required: "Required",
       optional: "Optional",
-      gpc: "A browser Global Privacy Control or Do Not Track signal was detected, so optional plugins remain off.",
+      gpc: "A browser Global Privacy Control or Do Not Track signal was detected, so optional plugins start off by default; you can still manage preferences.",
       categories: {
         analytics: {
           title: "Analytics",
@@ -89,13 +91,44 @@
     }
   };
 
+  const criticalCss = `
+.privacy-plugin-banner,.privacy-plugin-overlay,.privacy-plugin-settings{box-sizing:border-box;color:#172033;font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.privacy-plugin-banner *,.privacy-plugin-overlay *,.privacy-plugin-settings *{box-sizing:border-box}
+.privacy-plugin-banner{position:fixed;right:16px;bottom:var(--privacy-plugin-banner-bottom,16px);left:16px;z-index:2147483000;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;max-width:980px;margin:0 auto;padding:16px;border:1px solid rgba(15,23,42,.18);border-radius:8px;background:#fff;box-shadow:0 18px 44px rgba(15,23,42,.18)}
+.privacy-plugin-banner-content{display:grid;gap:6px}.privacy-plugin-banner strong,.privacy-plugin-title{margin:0;font-size:16px;font-weight:750;line-height:1.25}.privacy-plugin-banner p,.privacy-plugin-banner small,.privacy-plugin-lede,.privacy-plugin-notice{margin:0}.privacy-plugin-banner small,.privacy-plugin-notice,.privacy-plugin-category small{color:#4b5563;font-size:12px}
+.privacy-plugin-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.privacy-plugin-actions button,.privacy-plugin-settings,.privacy-plugin-panel>button[data-privacy-action=close]{min-height:40px;border:1px solid #172033;border-radius:6px;padding:0 14px;background:#fff;color:#172033;font:700 14px/1 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}.privacy-plugin-actions button[data-variant=primary]{background:#172033;color:#fff}
+.privacy-plugin-actions button:disabled{cursor:not-allowed;opacity:.55}.privacy-plugin-actions button:focus-visible,.privacy-plugin-settings:focus-visible,.privacy-plugin-panel>button[data-privacy-action=close]:focus-visible,.privacy-plugin-category:focus-within{outline:3px solid #93c5fd;outline-offset:2px}
+.privacy-plugin-overlay{position:fixed;inset:0;z-index:2147483001;display:grid;place-items:center;padding:18px;background:rgba(15,23,42,.46)}.privacy-plugin-panel{display:grid;gap:14px;width:min(760px,100%);max-height:min(720px,calc(100vh - 36px));overflow:auto;padding:20px;border-radius:8px;background:#fff;box-shadow:0 24px 70px rgba(15,23,42,.32)}
+.privacy-plugin-categories{display:grid;gap:10px}.privacy-plugin-category{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start;padding:14px;border:1px solid rgba(15,23,42,.14);border-radius:8px;cursor:pointer}.privacy-plugin-category input{width:20px;height:20px;margin:2px 0 0;accent-color:#172033}.privacy-plugin-category span{display:grid;gap:4px}.privacy-plugin-category strong{font-size:15px}.privacy-plugin-category em{color:#4b5563;font-style:normal;font-weight:700}
+.privacy-plugin-sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.privacy-plugin-settings{position:fixed;right:16px;bottom:var(--privacy-plugin-settings-bottom,var(--privacy-plugin-banner-bottom,16px));z-index:2147482999;min-height:36px;background:#fff;box-shadow:0 12px 30px rgba(15,23,42,.16)}.privacy-plugin-panel>button[data-privacy-action=close]{justify-self:start;border-color:transparent;padding-inline:0;color:#4b5563}
+@media (max-width:720px){.privacy-plugin-banner{grid-template-columns:1fr}.privacy-plugin-actions{justify-content:stretch}.privacy-plugin-actions button{flex:1 1 120px}.privacy-plugin-category{grid-template-columns:auto minmax(0,1fr)}.privacy-plugin-category em{grid-column:2}}
+`;
+
   const normalizeCountry = (value) => String(value || "").trim().toUpperCase();
+  const normalizeLang = (value) => {
+    const lang = String(value || "").trim().toLowerCase();
+    if (!lang) return "";
+    if (lang === "zh-tw" || lang === "zh-hk" || lang === "zh-mo" || lang.startsWith("zh-hant")) return "zh-TW";
+    if (lang === "zh-cn" || lang === "zh-sg" || lang.startsWith("zh-hans") || lang === "zh") return "zh-CN";
+    if (lang.startsWith("en")) return "en";
+    return "";
+  };
+  const siteLang = () => {
+    const scriptedLang = normalizeLang(currentScript?.dataset.lang);
+    if (scriptedLang) return scriptedLang;
+    const htmlLang = normalizeLang(document.documentElement.getAttribute("lang"));
+    if (htmlLang) return htmlLang;
+    const pathLang = normalizeLang(window.location.pathname.split("/").filter(Boolean)[0]);
+    if (pathLang) return pathLang;
+    const currentLocale = document.querySelector("[data-locale-choice][aria-current='page']")?.getAttribute("data-locale-choice");
+    return normalizeLang(currentLocale);
+  };
   const browserLang = () => {
+    const pageLang = siteLang();
+    if (pageLang) return pageLang;
     const languages = navigator.languages?.length ? navigator.languages : [navigator.language || "en"];
-    const language = String(languages[0] || "en").toLowerCase();
-    if (language === "zh-tw" || language === "zh-hk" || language === "zh-mo" || language.startsWith("zh-hant")) return "zh-TW";
-    if (language.startsWith("zh")) return "zh-CN";
-    return "en";
+    return normalizeLang(languages[0]) || "en";
   };
   const readJson = (key) => {
     try {
@@ -117,6 +150,12 @@
   }
 
   function loadStylesheet() {
+    if (!document.querySelector("style[data-privacy-plugin-critical-style]")) {
+      const style = document.createElement("style");
+      style.dataset.privacyPluginCriticalStyle = "true";
+      style.textContent = criticalCss;
+      document.head.append(style);
+    }
     if (document.querySelector(`link[data-privacy-plugin-style][href="${stylesheetUrl}"]`)) return;
     const link = document.createElement("link");
     link.rel = "stylesheet";
@@ -232,10 +271,37 @@
       choices,
       country,
       updatedAt: new Date().toISOString(),
-      version: 3
+      version: 4
     };
     writeJson(storageKey, value);
+    legacyStorageKeys.forEach((key) => {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        /* Ignore private-mode storage errors. */
+      }
+    });
     return value;
+  }
+
+  function categoriesFor(context) {
+    return [...new Set(context.gatedPlugins.map(categoryOf))];
+  }
+
+  function emptyChoices(context) {
+    return Object.fromEntries(categoriesFor(context).map((category) => [category, false]));
+  }
+
+  function readSavedConsent(context) {
+    const saved = readJson(storageKey);
+    if (saved?.version === 4 && saved.status) return saved;
+
+    const legacy = legacyStorageKeys.map(readJson).find((value) => value?.status);
+    if (!legacy) return null;
+    const choices = { ...emptyChoices(context), ...(legacy.choices || {}) };
+    const rejectsAll = legacy.status === "rejected" || categoriesFor(context).every((category) => choices[category] !== true);
+    if (!rejectsAll) return null;
+    return saveConsent("rejected", emptyChoices(context), context.country);
   }
 
   function applyConsent(plugins, gatedPlugins, consent) {
@@ -258,13 +324,17 @@
   }
 
   function renderSettingsButton(config, context) {
-    if (document.querySelector("[data-privacy-settings]")) return;
+    document.querySelectorAll("[data-privacy-settings]").forEach((node) => node.remove());
     loadStylesheet();
     const copy = copyFor(config);
     const trigger = button(copy.settings, "settings", "secondary");
     trigger.className = "privacy-plugin-settings";
     trigger.dataset.privacySettings = "true";
-    trigger.addEventListener("click", () => showPreferenceCenter(config, context));
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.addEventListener("click", () => {
+      const latest = window[globalStateKey] || { config, context };
+      if (latest.config && latest.context) showPreferenceCenter(latest.config, latest.context);
+    });
     document.body.append(trigger);
   }
 
@@ -272,26 +342,32 @@
     loadStylesheet();
     document.querySelectorAll("[data-privacy-root]").forEach((node) => node.remove());
     const copy = copyFor(config);
-    const saved = readJson(storageKey);
+    const saved = readSavedConsent(context);
     const choices = { ...(saved?.choices || {}) };
-    const categories = [...new Set(context.gatedPlugins.map(categoryOf))];
+    const categories = categoriesFor(context);
     categories.forEach((category) => {
       if (choices[category] == null) choices[category] = false;
     });
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const titleId = "privacy-plugin-title";
+    const descriptionId = "privacy-plugin-description";
 
     const overlay = document.createElement("section");
     overlay.className = "privacy-plugin-overlay";
     overlay.dataset.privacyRoot = "true";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
-    overlay.setAttribute("aria-labelledby", "privacy-plugin-title");
+    overlay.setAttribute("aria-labelledby", titleId);
+    overlay.setAttribute("aria-describedby", descriptionId);
 
     const panel = document.createElement("div");
     panel.className = "privacy-plugin-panel";
     const title = text("h2", copy.preferences, "privacy-plugin-title");
-    title.id = "privacy-plugin-title";
+    title.id = titleId;
     panel.append(title);
-    panel.append(text("p", context.globalOptOut ? copy.gpc : copy.bannerMessage, "privacy-plugin-lede"));
+    const lede = text("p", context.globalOptOut ? copy.gpc : copy.bannerMessage, "privacy-plugin-lede");
+    lede.id = descriptionId;
+    panel.append(lede);
     const profile = regionProfile(context.country);
     const notice = copy.jurisdictionNotice?.[profile] || copy.jurisdictionNotice?.default;
     if (notice) panel.append(text("p", notice, "privacy-plugin-notice"));
@@ -305,8 +381,8 @@
       item.className = "privacy-plugin-category";
       const input = document.createElement("input");
       input.type = "checkbox";
-      input.checked = choices[category] === true && !context.globalOptOut;
-      input.disabled = context.globalOptOut;
+      input.dataset.category = category;
+      input.checked = choices[category] === true;
       input.addEventListener("change", () => {
         choices[category] = input.checked;
       });
@@ -316,7 +392,7 @@
       categoryPlugins.forEach((plugin) => {
         body.append(text("small", plugin.disclosure || plugin.name || plugin.id));
       });
-      item.append(input, body, text("em", context.globalOptOut ? copy.required : copy.optional));
+      item.append(input, body, text("em", copy.optional));
       list.append(item);
     });
     panel.append(list);
@@ -332,6 +408,22 @@
     panel.append(button(copy.close, "close", "text"));
     overlay.append(panel);
     document.body.append(overlay);
+    panel.tabIndex = -1;
+    const focusTarget = panel;
+    focusTarget.focus?.();
+
+    const closePreferenceCenter = () => {
+      overlay.remove();
+      previousFocus?.focus?.();
+      if (!readSavedConsent(context)) showBanner(config, context);
+    };
+
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePreferenceCenter();
+      }
+    });
 
     overlay.addEventListener("click", (event) => {
       const action = event.target.closest("[data-privacy-action]")?.dataset.privacyAction;
@@ -339,11 +431,17 @@
       event.preventDefault();
       event.stopPropagation();
       if (action === "close") {
-        overlay.remove();
+        closePreferenceCenter();
         return;
       }
-      if (action === "reject") categories.forEach((category) => { choices[category] = false; });
-      if (action === "accept" && !context.globalOptOut) categories.forEach((category) => { choices[category] = true; });
+      if (action === "reject" || action === "accept") {
+        list.querySelectorAll("input[type='checkbox']").forEach((input) => {
+          input.checked = action === "accept";
+        });
+      }
+      list.querySelectorAll("input[type='checkbox']").forEach((input) => {
+        if (!input.disabled) choices[input.dataset.category] = input.checked;
+      });
       const consent = saveConsent(action === "accept" ? "accepted" : action === "reject" ? "rejected" : "custom", choices, context.country);
       overlay.remove();
       if (needsReloadForDisabledPlugins(context.gatedPlugins, choices)) {
@@ -364,11 +462,17 @@
     banner.dataset.privacyRoot = "true";
     banner.setAttribute("role", "dialog");
     banner.setAttribute("aria-live", "polite");
+    banner.setAttribute("aria-labelledby", "privacy-plugin-banner-title");
+    banner.setAttribute("aria-describedby", "privacy-plugin-banner-description");
 
     const content = document.createElement("div");
     content.className = "privacy-plugin-banner-content";
-    content.append(text("strong", copy.bannerTitle));
-    content.append(text("p", context.globalOptOut ? copy.gpc : copy.bannerMessage));
+    const title = text("strong", copy.bannerTitle);
+    title.id = "privacy-plugin-banner-title";
+    content.append(title);
+    const description = text("p", context.globalOptOut ? copy.gpc : copy.bannerMessage);
+    description.id = "privacy-plugin-banner-description";
+    content.append(description);
     const profile = regionProfile(context.country);
     const notice = copy.jurisdictionNotice?.[profile] || copy.jurisdictionNotice?.default;
     if (notice) content.append(text("small", notice));
@@ -392,12 +496,12 @@
         showPreferenceCenter(config, context);
         return;
       }
-      const categories = [...new Set(context.gatedPlugins.map(categoryOf))];
+      const categories = categoriesFor(context);
       const choices = {};
       categories.forEach((category) => {
-        choices[category] = action === "accept" && !context.globalOptOut;
+        choices[category] = action === "accept";
       });
-      const consent = saveConsent(action === "accept" && !context.globalOptOut ? "accepted" : "rejected", choices, context.country);
+      const consent = saveConsent(action === "accept" ? "accepted" : "rejected", choices, context.country);
       banner.remove();
       if (needsReloadForDisabledPlugins(context.gatedPlugins, choices)) {
         window.location.reload();
@@ -417,14 +521,29 @@
     const globalOptOut = hasGlobalOptOut();
     const gatedPlugins = plugins.filter((plugin) => needsConsent(country, plugin, config));
     const context = { plugins, gatedPlugins, country, globalOptOut };
-    const saved = readJson(storageKey);
+    window[globalStateKey] = { config, context };
+    window.JSGripePrivacy = {
+      openPreferences: () => showPreferenceCenter(config, context),
+      reset: () => {
+        [storageKey, ...legacyStorageKeys].forEach((key) => {
+          try {
+            localStorage.removeItem(key);
+          } catch {
+            /* Ignore private-mode storage errors. */
+          }
+        });
+        document.querySelectorAll("[data-privacy-root],[data-privacy-settings]").forEach((node) => node.remove());
+        showBanner(config, context);
+      }
+    };
+    let saved = readSavedConsent(context);
 
     if (!gatedPlugins.length) {
       if (!globalOptOut) plugins.forEach(loadPlugin);
       return;
     }
-    if (saved?.version === 3) {
-      applyConsent(plugins, gatedPlugins, globalOptOut ? { choices: {} } : saved);
+    if (saved?.version === 4) {
+      applyConsent(plugins, gatedPlugins, saved);
       renderSettingsButton(config, context);
       return;
     }
