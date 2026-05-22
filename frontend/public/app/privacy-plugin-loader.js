@@ -31,6 +31,8 @@
       settings: "隐私设置",
       required: "必要",
       optional: "可选",
+      requiredServicesTitle: "必要项目",
+      requiredServicesDescription: "这些项目用于提供你请求的服务、安全、会话、语言偏好或保存隐私选择，不能在此关闭。",
       gpc: "检测到浏览器全局隐私控制或 Do Not Track，非必要插件默认保持关闭；你仍可以管理偏好。",
       categories: {
         analytics: {
@@ -56,6 +58,8 @@
       settings: "隱私設定",
       required: "必要",
       optional: "可選",
+      requiredServicesTitle: "必要項目",
+      requiredServicesDescription: "這些項目用於提供你要求的服務、安全、工作階段、語言偏好或儲存隱私選擇，不能在此關閉。",
       gpc: "偵測到瀏覽器全域隱私控制或 Do Not Track，非必要外掛預設保持關閉；你仍可以管理偏好。",
       categories: {
         analytics: {
@@ -81,6 +85,8 @@
       settings: "Privacy settings",
       required: "Required",
       optional: "Optional",
+      requiredServicesTitle: "Required services",
+      requiredServicesDescription: "These services provide the requested site, security, session, language preference, or privacy-choice storage and cannot be turned off here.",
       gpc: "A browser Global Privacy Control or Do Not Track signal was detected, so optional plugins start off by default; you can still manage preferences.",
       categories: {
         analytics: {
@@ -258,6 +264,12 @@
     return config.ui?.[lang] || config.ui?.en || fallbackCopy[lang] || fallbackCopy.en;
   }
 
+  function localizedValue(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const lang = browserLang();
+    return value[lang] || value.en || value["zh-CN"] || Object.values(value).find(Boolean) || "";
+  }
+
   function categoryCopy(copy, category) {
     return copy.categories?.[category] || fallbackCopy.en.categories[category] || {
       title: category,
@@ -302,6 +314,10 @@
     const rejectsAll = legacy.status === "rejected" || categoriesFor(context).every((category) => choices[category] !== true);
     if (!rejectsAll) return null;
     return saveConsent("rejected", emptyChoices(context), context.country);
+  }
+
+  function requiredServicesFor(config) {
+    return Array.isArray(config.requiredServices) ? config.requiredServices.filter(Boolean) : [];
   }
 
   function applyConsent(plugins, gatedPlugins, consent) {
@@ -374,6 +390,24 @@
 
     const list = document.createElement("div");
     list.className = "privacy-plugin-categories";
+    const requiredServices = requiredServicesFor(config);
+    if (requiredServices.length) {
+      const item = document.createElement("label");
+      item.className = "privacy-plugin-category";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = true;
+      input.disabled = true;
+      input.setAttribute("aria-label", copy.requiredServicesTitle || copy.required);
+      const body = document.createElement("span");
+      body.append(text("strong", copy.requiredServicesTitle || copy.required));
+      body.append(text("span", copy.requiredServicesDescription || ""));
+      requiredServices.forEach((service) => {
+        body.append(text("small", localizedValue(service.disclosure) || service.name || service.id));
+      });
+      item.append(input, body, text("em", copy.required));
+      list.append(item);
+    }
     categories.forEach((category) => {
       const categoryPlugins = context.gatedPlugins.filter((plugin) => categoryOf(plugin) === category);
       const categoryInfo = categoryCopy(copy, category);

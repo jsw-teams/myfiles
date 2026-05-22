@@ -26,6 +26,8 @@
       "settings": "隐私设置",
       "required": "必要",
       "optional": "可选",
+      "requiredServicesTitle": "必要项目",
+      "requiredServicesDescription": "这些项目用于提供你请求的服务、安全、会话、语言偏好或保存隐私选择，不能在此关闭。",
       "gpc": "检测到浏览器全局隐私控制或 Do Not Track，非必要插件默认保持关闭；你仍可以管理偏好。",
       "categories": {
         "analytics": {
@@ -52,6 +54,8 @@
       "settings": "隱私設定",
       "required": "必要",
       "optional": "可選",
+      "requiredServicesTitle": "必要項目",
+      "requiredServicesDescription": "這些項目用於提供你要求的服務、安全、工作階段、語言偏好或儲存隱私選擇，不能在此關閉。",
       "gpc": "偵測到瀏覽器全域隱私控制或 Do Not Track，非必要外掛預設保持關閉；你仍可以管理偏好。",
       "categories": {
         "analytics": {
@@ -78,6 +82,8 @@
       "settings": "Privacy settings",
       "required": "Required",
       "optional": "Optional",
+      "requiredServicesTitle": "Required services",
+      "requiredServicesDescription": "These services provide the requested site, security, session, language preference, or privacy-choice storage and cannot be turned off here.",
       "gpc": "A browser Global Privacy Control or Do Not Track signal was detected, so optional plugins start off by default; you can still manage preferences.",
       "categories": {
         "analytics": {
@@ -87,6 +93,26 @@
       }
     }
   },
+  "requiredServices": [
+    {
+      "id": "privacy-choice-storage",
+      "name": "Privacy choice storage",
+      "disclosure": {
+        "zh-CN": "隐私选择存储：用于记住你在本浏览器中的拒绝、接受或自定义偏好，避免每次刷新都重复提示。",
+        "zh-TW": "隱私選擇儲存：用於記住你在本瀏覽器中的拒絕、接受或自訂偏好，避免每次重新整理都重複提示。",
+        "en": "Privacy choice storage: remembers your reject, accept, or custom preference in this browser so the banner does not repeat on every refresh."
+      }
+    },
+    {
+      "id": "site-operation-security-session",
+      "name": "Site operation, security, and session",
+      "disclosure": {
+        "zh-CN": "站点运行、安全与会话：用于提供你请求的页面、账户登录状态、基础安全防护、语言偏好和服务连续性。",
+        "zh-TW": "網站運作、安全與工作階段：用於提供你要求的頁面、帳戶登入狀態、基礎安全防護、語言偏好與服務連續性。",
+        "en": "Site operation, security, and session: supports requested pages, account login state, basic security protections, language preference, and service continuity."
+      }
+    }
+  ],
   "plugins": [
     {
       "id": "cloudflare-web-analytics",
