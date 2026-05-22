@@ -16,13 +16,13 @@
   const fallbackCopy = {
     "zh-CN": {
       bannerTitle: "隐私选择",
-      bannerMessage: "我们只会在你同意后启用非必要分析插件。你可以拒绝、接受，或按类别管理偏好。",
+      bannerMessage: "我们只会在你同意后启用非必要分析插件。你可以仅保留最小必要项目、全部接受，或按类别管理偏好。",
       jurisdictionNotice: {
         eu: "非必要插件默认关闭，只有在同意后才会加载；拒绝和接受同样容易，并可随时撤回。",
         us: "我们尊重全局隐私控制信号，并提供退出共享、定向广告或非必要分析的选择。",
         jp: "我们会说明第三方外部传送目的、接收方和插件用途，并在启用第三方分析前提供选择。"
       },
-      rejectAll: "全部拒绝",
+      rejectAll: "仅最小必要",
       acceptAll: "全部接受",
       customize: "管理偏好",
       save: "保存选择",
@@ -43,13 +43,13 @@
     },
     "zh-TW": {
       bannerTitle: "隱私選擇",
-      bannerMessage: "我們只會在你同意後啟用非必要分析外掛。你可以拒絕、接受，或依類別管理偏好。",
+      bannerMessage: "我們只會在你同意後啟用非必要分析外掛。你可以僅保留最小必要項目、全部接受，或依類別管理偏好。",
       jurisdictionNotice: {
         eu: "非必要外掛預設關閉，只有在同意後才會載入；拒絕和接受同樣容易，並可隨時撤回。",
         us: "我們尊重全域隱私控制訊號，並提供退出共享、定向廣告或非必要分析的選擇。",
         jp: "我們會說明第三方外部傳送目的、接收方和外掛用途，並在啟用第三方分析前提供選擇。"
       },
-      rejectAll: "全部拒絕",
+      rejectAll: "僅最小必要",
       acceptAll: "全部接受",
       customize: "管理偏好",
       save: "儲存選擇",
@@ -70,13 +70,13 @@
     },
     en: {
       bannerTitle: "Privacy Choices",
-      bannerMessage: "We enable optional analytics plugins only after your choice. You can reject, accept, or manage preferences by category.",
+      bannerMessage: "We enable optional analytics plugins only after your choice. You can keep only required services, accept all, or manage preferences by category.",
       jurisdictionNotice: {
         eu: "Optional plugins are off by default, load only after consent, and consent can be withdrawn as easily as it is given.",
         us: "We honor global privacy control signals and provide choices to opt out of sharing, targeted advertising, or optional analytics.",
         jp: "We describe external transmission purposes, recipients, and plugin use before enabling third-party analytics."
       },
-      rejectAll: "Reject all",
+      rejectAll: "Only necessary",
       acceptAll: "Accept all",
       customize: "Customize",
       save: "Save choices",
