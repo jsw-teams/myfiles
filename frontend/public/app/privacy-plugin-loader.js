@@ -1,7 +1,8 @@
 (() => {
   const currentScript = document.currentScript;
-  const configUrl = currentScript?.dataset.config || "/privacy-plugins.json";
-  const stylesheetUrl = currentScript?.dataset.stylesheet || "/privacy-plugin-banner.css";
+  const scriptBaseUrl = currentScript?.src ? new URL(".", currentScript.src) : new URL("/", window.location.href);
+  const configUrl = currentScript?.dataset.config || new URL("privacy-plugins.json", scriptBaseUrl).href;
+  const stylesheetUrl = currentScript?.dataset.stylesheet || new URL("privacy-plugin-banner.css", scriptBaseUrl).href;
   const storageKey = "privacy_plugins_consent_v4";
   const legacyStorageKeys = ["privacy_plugins_consent_v3"];
   const regionKey = "privacy_plugins_region_v1";
