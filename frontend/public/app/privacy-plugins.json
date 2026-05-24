@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "revision": "2026-05-20-region-aware-v7",
+  "revision": "2026-05-24-site-specific-v8",
   "consent": {
     "mode": "always-prompt",
     "storageVersion": 4,
@@ -10,7 +10,7 @@
   "ui": {
     "zh-CN": {
       "bannerTitle": "隐私选择",
-      "bannerMessage": "我们面向不同国家和地区提供服务，非必要分析插件默认关闭。你可以仅保留最小必要项目、全部接受，或按类别管理偏好；选择会保存在本机浏览器中。",
+      "bannerMessage": "文件服务会先保持非必要分析插件关闭。你可以仅保留最小必要项目、全部接受，或按类别管理偏好；选择会保存在本机浏览器中。",
       "jurisdictionNotice": {
         "eu": "非必要插件仅在同意后加载，拒绝和接受同样容易，并可随时撤回。",
         "us": "我们尊重全局隐私控制信号；本站不使用定向广告，分析插件仍提供退出选择。",
@@ -32,13 +32,14 @@
       "categories": {
         "analytics": {
           "title": "分析",
-          "description": "帮助我们了解页面访问量、站点性能和基础使用趋势，不用于定向广告或跨站跟踪。"
+          "description": "用于了解文件服务登录、仪表盘和文件访问页面的访问量与性能，不用于读取文件内容、定向广告或跨站跟踪。"
         }
-      }
+      },
+      "language": "语言"
     },
     "zh-TW": {
       "bannerTitle": "隱私選擇",
-      "bannerMessage": "我們面向不同國家和地區提供服務，非必要分析外掛預設關閉。你可以僅保留最小必要項目、全部接受，或依類別管理偏好；選擇會保存在本機瀏覽器中。",
+      "bannerMessage": "檔案服務會先保持非必要分析外掛關閉。你可以僅保留最小必要項目、全部接受，或依類別管理偏好；選擇會保存在本機瀏覽器中。",
       "jurisdictionNotice": {
         "eu": "非必要外掛僅在同意後載入，拒絕和接受同樣容易，並可隨時撤回。",
         "us": "我們尊重全域隱私控制訊號；本站不使用定向廣告，分析外掛仍提供退出選擇。",
@@ -60,13 +61,14 @@
       "categories": {
         "analytics": {
           "title": "分析",
-          "description": "幫助我們了解頁面訪問量、網站效能和基礎使用趨勢，不用於定向廣告或跨站追蹤。"
+          "description": "用於了解檔案服務登入、儀表板和檔案訪問頁面的訪問量與效能，不用於讀取檔案內容、定向廣告或跨站追蹤。"
         }
-      }
+      },
+      "language": "語言"
     },
     "en": {
       "bannerTitle": "Privacy Choices",
-      "bannerMessage": "This site is available to visitors from many countries and regions, so optional analytics plugins are off by default. You can keep only required services, accept all, or manage preferences by category; your choice is saved in this browser.",
+      "bannerMessage": "Files keeps optional analytics plugins off by default. You can keep only required services, accept all, or manage preferences by category; your choice is saved in this browser.",
       "jurisdictionNotice": {
         "eu": "Optional plugins load only after consent, rejecting is as easy as accepting, and consent can be withdrawn at any time.",
         "us": "We honor Global Privacy Control signals. This site does not use targeted advertising, and optional analytics can still be declined.",
@@ -88,35 +90,45 @@
       "categories": {
         "analytics": {
           "title": "Analytics",
-          "description": "Helps us understand page visits, site performance, and basic usage trends. It is not used for targeted advertising or cross-site tracking."
+          "description": "Measures Files login, dashboard, and file access page visits and performance. It is not used to read file contents, target ads, or track across sites."
         }
-      }
+      },
+      "language": "Language"
     }
   },
   "requiredServices": [
     {
       "id": "privacy-choice-storage",
-      "name": "Privacy choice storage",
+      "name": "Files privacy choice storage",
       "disclosure": {
-        "zh-CN": "隐私选择存储：用于记住你在本浏览器中的仅最小必要、全部接受或自定义偏好，避免每次刷新都重复提示。",
-        "zh-TW": "隱私選擇儲存：用於記住你在本瀏覽器中的僅最小必要、全部接受或自訂偏好，避免每次重新整理都重複提示。",
-        "en": "Privacy choice storage: remembers your only-necessary, accept-all, or custom preference in this browser so the banner does not repeat on every refresh."
+        "zh-CN": "隐私选择存储：用于记住你在文件服务中的仅最小必要、全部接受或自定义偏好，避免刷新或切换页面后重复显示横幅。",
+        "zh-TW": "隱私選擇儲存：用於記住你在檔案服務中的僅最小必要、全部接受或自訂偏好，避免重新整理或切換頁面後重複顯示橫幅。",
+        "en": "Privacy choice storage: remembers your only-necessary, accept-all, or custom preference for Files so the banner does not repeat after refreshes or page changes."
       }
     },
     {
       "id": "site-operation-security-session",
-      "name": "Site operation, security, and session",
+      "name": "Files operation, security, and session",
       "disclosure": {
-        "zh-CN": "站点运行、安全与会话：用于提供你请求的页面、账户登录状态、基础安全防护、语言偏好和服务连续性。",
-        "zh-TW": "網站運作、安全與工作階段：用於提供你要求的頁面、帳戶登入狀態、基礎安全防護、語言偏好與服務連續性。",
-        "en": "Site operation, security, and session: supports requested pages, account login state, basic security protections, language preference, and service continuity."
+        "zh-CN": "文件会话与访问控制：用于保持登录状态、展示仪表盘、处理文件列表和受保护的下载访问。",
+        "zh-TW": "檔案工作階段與訪問控制：用於保持登入狀態、顯示儀表板、處理檔案列表和受保護的下載訪問。",
+        "en": "File session and access control: keeps login state, dashboard display, file lists, and protected download access working."
+      }
+    },
+    {
+      "id": "site-language-service-continuity",
+      "name": "Files language and service continuity",
+      "disclosure": {
+        "zh-CN": "安全与服务连续性：用于基础安全校验、请求状态和错误恢复。",
+        "zh-TW": "安全與服務連續性：用於基礎安全校驗、請求狀態和錯誤恢復。",
+        "en": "Security and service continuity: supports basic security checks, request state, and error recovery."
       }
     }
   ],
   "plugins": [
     {
       "id": "cloudflare-web-analytics",
-      "name": "Cloudflare Web Analytics",
+      "name": "Files Cloudflare Web Analytics",
       "enabled": true,
       "type": "script",
       "src": "https://static.cloudflareinsights.com/beacon.min.js",
@@ -124,17 +136,59 @@
         "defer": true,
         "data-cf-beacon": "{\"token\":\"4349c15d66d44f79b7d07f89c1e491ab\"}"
       },
-      "disclosure": "Cloudflare Web Analytics: used to measure page visits, performance, and basic usage trends. Provider: Cloudflare. Category: analytics. Non-essential and loaded only after consent. Not used for targeted advertising or cross-site tracking.",
+      "disclosure": {
+        "zh-CN": "Cloudflare Web Analytics：用于了解文件服务登录、仪表盘和文件访问页面的访问量与性能，不用于读取文件内容、定向广告或跨站跟踪。 提供方：Cloudflare。类别：分析。仅在同意后加载。",
+        "zh-TW": "Cloudflare Web Analytics：用於了解檔案服務登入、儀表板和檔案訪問頁面的訪問量與效能，不用於讀取檔案內容、定向廣告或跨站追蹤。 提供方：Cloudflare。類別：分析。僅在同意後載入。",
+        "en": "Cloudflare Web Analytics: Measures Files login, dashboard, and file access page visits and performance. It is not used to read file contents, target ads, or track across sites. Provider: Cloudflare. Category: analytics. Loaded only after consent."
+      },
       "policy": {
         "category": "analytics",
         "mode": "region-aware",
         "consentMode": "always-prompt",
         "honorGlobalPrivacyControl": true,
         "consentCountries": [
-          "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
-          "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
-          "SI", "ES", "SE", "IS", "LI", "NO", "GB", "UK", "CH", "BR", "CA", "CN",
-          "HK", "MO", "TW", "ZA", "JP", "US"
+          "AT",
+          "BE",
+          "BG",
+          "HR",
+          "CY",
+          "CZ",
+          "DK",
+          "EE",
+          "FI",
+          "FR",
+          "DE",
+          "GR",
+          "HU",
+          "IE",
+          "IT",
+          "LV",
+          "LT",
+          "LU",
+          "MT",
+          "NL",
+          "PL",
+          "PT",
+          "RO",
+          "SK",
+          "SI",
+          "ES",
+          "SE",
+          "IS",
+          "LI",
+          "NO",
+          "GB",
+          "UK",
+          "CH",
+          "BR",
+          "CA",
+          "CN",
+          "HK",
+          "MO",
+          "TW",
+          "ZA",
+          "JP",
+          "US"
         ]
       }
     }
