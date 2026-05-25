@@ -13,6 +13,7 @@ else
 fi
 
 npm run build
+/opt/deploy-hooks/bin/inject-privacy-analytics-token.mjs "$ROOT/frontend/dist/app/privacy-plugins.json"
 
 echo "[go] build"
 cd "$ROOT"

@@ -69,6 +69,16 @@ a { color: var(--accent); text-decoration: none; }
   border:3px solid var(--line); border-radius:8px; background:var(--accent-2);
   box-shadow:4px 4px 0 #182033; color:#15120a; font-size:30px; font-weight:900;
 }
+.brand-mark svg, .icon svg, .file-badge svg, .ui-icon {
+  width: 1em;
+  height: 1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.brand-mark svg { width: 30px; height: 30px; }
 .brand h1 { margin:.1em 0 0; font-size:clamp(42px, 7vw, 82px); line-height:.92; letter-spacing:0; }
 .action-panel {
   background:rgba(255,255,255,.82);
@@ -78,7 +88,8 @@ a { color: var(--accent); text-decoration: none; }
   box-shadow:0 12px 28px rgba(24,32,51,.08);
 }
 .panel-title { display:flex; align-items:center; gap:10px; font-weight:900; font-size:20px; }
-.icon { width:34px; height:34px; display:grid; place-items:center; border:2px solid var(--line); border-radius:8px; background:#dff0ff; }
+.icon { width:34px; height:34px; display:grid; place-items:center; border:2px solid var(--line); border-radius:8px; background:#dff0ff; color:var(--text); }
+.icon svg { width: 20px; height: 20px; }
 .pickup-panel { display:grid; gap:14px; border-color:rgba(52,185,120,.48); }
 .pickup-form { display:grid; grid-template-columns: 1fr auto; gap:10px; }
 .pickup-input { min-height:48px; font-size:20px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
@@ -99,6 +110,7 @@ a { color: var(--accent); text-decoration: none; }
 .pickup-mini strong { letter-spacing:.08em; }
 .file-preview { width: 84px; height: 84px; border: 2px solid var(--line); object-fit: cover; background:#000; }
 .file-badge { width:84px; height:84px; display:grid; place-items:center; border:2px solid var(--line); border-radius:8px; background:#dff0ff; color:var(--text); font-size:28px; font-weight:900; }
+.file-badge svg { width: 34px; height: 34px; }
 .icon-button {
   width:40px; height:40px; display:grid; place-items:center; border:3px solid var(--line); border-radius:6px;
   background:#fff; color:var(--text); font-weight:900; box-shadow:3px 3px 0 #182033; cursor:pointer;
@@ -132,6 +144,8 @@ a { color: var(--accent); text-decoration: none; }
 .sidebar { position: sticky; top:20px; align-self:start; }
 .nav { display:grid; gap:10px; margin-top:16px; }
 .nav a, .nav button { text-align:left; color:var(--text); border:2px solid rgba(242,209,107,.4); background:rgba(0,0,0,.16); padding:10px; border-radius:6px; }
+.nav a span, .nav button span { display:flex; align-items:center; gap:8px; }
+.nav .ui-icon { width:18px; height:18px; flex:0 0 auto; }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { border-bottom: 1px solid rgba(242,209,107,.25); padding: 10px; text-align: left; vertical-align: top; }
 .input { width:100%; padding:12px; border:3px solid var(--line); border-radius:6px; background:#fff; color:var(--text); }

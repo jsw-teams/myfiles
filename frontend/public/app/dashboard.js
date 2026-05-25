@@ -40,11 +40,20 @@ const L = {
 }[lang];
 
 const views = {
-  home: { label: L.home, kicker: L.home, icon: '⌂' },
-  files: { label: L.files, kicker: L.files, icon: '▤' },
-  'admin-files': { label: L.adminFiles, kicker: L.adminFiles, icon: '☷', need: 'allFilesRead' },
-  audit: { label: L.audit, kicker: L.audit, icon: '◎', need: 'auditRead' },
-  settings: { label: L.settings, kicker: L.settings, icon: '⚙', need: 'settingsWrite' }
+  home: { label: L.home, kicker: L.home, icon: 'home' },
+  files: { label: L.files, kicker: L.files, icon: 'files' },
+  'admin-files': { label: L.adminFiles, kicker: L.adminFiles, icon: 'folderCog', need: 'allFilesRead' },
+  audit: { label: L.audit, kicker: L.audit, icon: 'clipboardList', need: 'auditRead' },
+  settings: { label: L.settings, kicker: L.settings, icon: 'settings', need: 'settingsWrite' }
+};
+
+const iconPaths = {
+  home: '<path d="m3 9 9-7 9 7"></path><path d="M9 22V12h6v10"></path><path d="M21 9v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9"></path>',
+  files: '<path d="M20 7h-3a2 2 0 0 1-2-2V2"></path><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"></path><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"></path>',
+  folderCog: '<path d="M10.5 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4.5L11 6h9a2 2 0 0 1 2 2v3.5"></path><circle cx="17" cy="17" r="3"></circle><path d="M17 13.5V12"></path><path d="M17 22v-1.5"></path><path d="m20 14.5-1.3.8"></path><path d="m15.3 18.7-1.3.8"></path><path d="m20 19.5-1.3-.8"></path><path d="m15.3 15.3-1.3-.8"></path>',
+  clipboardList: '<rect width="8" height="4" x="8" y="2" rx="1"></rect><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><path d="M12 11h4"></path><path d="M12 16h4"></path><path d="M8 11h.01"></path><path d="M8 16h.01"></path>',
+  settings: '<path d="M9.7 3.4a1.6 1.6 0 0 1 3 0l.2.8a1.6 1.6 0 0 0 2.3 1l.7-.4a1.6 1.6 0 0 1 2.2 2.2l-.4.7a1.6 1.6 0 0 0 1 2.3l.8.2a1.6 1.6 0 0 1 0 3l-.8.2a1.6 1.6 0 0 0-1 2.3l.4.7a1.6 1.6 0 0 1-2.2 2.2l-.7-.4a1.6 1.6 0 0 0-2.3 1l-.2.8a1.6 1.6 0 0 1-3 0l-.2-.8a1.6 1.6 0 0 0-2.3-1l-.7.4a1.6 1.6 0 0 1-2.2-2.2l.4-.7a1.6 1.6 0 0 0-1-2.3l-.8-.2a1.6 1.6 0 0 1 0-3l.8-.2a1.6 1.6 0 0 0 1-2.3l-.4-.7a1.6 1.6 0 0 1 2.2-2.2l.7.4a1.6 1.6 0 0 0 2.3-1z"></path><circle cx="12" cy="12" r="3"></circle>',
+  logOut: '<path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>'
 };
 
 const settingFields = [
@@ -66,10 +75,10 @@ boot().catch(() => { location.href = '/login'; });
 async function boot() { state.me = await api('/api/account/me'); const user = state.me.user || {}; profile.textContent = `${user.displayName || user.email || user.id} · ${user.role || user.userType}`; renderNav(); window.addEventListener('hashchange', renderRoute); renderRoute(); }
 function allowed(view) { const need = views[view]?.need; return !need || Boolean(state.me?.myfilesPermissions?.[need]); }
 function currentView() { const name = location.hash.replace('#', '') || 'home'; return views[name] && allowed(name) ? name : 'home'; }
-function renderNav() { nav.innerHTML = Object.entries(views).filter(([key]) => allowed(key)).map(([key, item]) => `<a class="dash-nav-item" href="/dashboard#${key}" data-view-link="${key}"><span>${item.icon} ${escapeHtml(item.label)}</span></a>`).join('') + `<button id="logout" class="dash-nav-item danger" type="button"><span>${escapeHtml(L.logout)}</span></button>`; document.querySelector('#logout').onclick = async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; }; }
+function renderNav() { nav.innerHTML = Object.entries(views).filter(([key]) => allowed(key)).map(([key, item]) => `<a class="dash-nav-item" href="/dashboard#${key}" data-view-link="${key}"><span>${iconSvg(item.icon)}${escapeHtml(item.label)}</span></a>`).join('') + `<button id="logout" class="dash-nav-item danger" type="button"><span>${iconSvg('logOut')}${escapeHtml(L.logout)}</span></button>`; document.querySelector('#logout').onclick = async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; }; }
 async function renderRoute() { const view = currentView(); document.querySelectorAll('[data-view-link]').forEach((link) => link.classList.toggle('active', link.dataset.viewLink === view)); if (view === 'home') return renderHome(); if (view === 'files') return renderFiles(); if (view === 'admin-files') return renderAdminFiles(); if (view === 'audit') return renderAudit(); if (view === 'settings') return renderSettings(); }
 function shell(title, kicker, desc, body) { app.innerHTML = `<section class="pixel-card dashboard-panel grid"><header class="page-head"><div class="bear-helper"><img src="/assets/mascot-files.png" alt="" /></div><div><div class="pixel-kicker">${escapeHtml(kicker)}</div><h1>${escapeHtml(title)}</h1><p class="muted">${escapeHtml(desc)}</p></div></header>${body}</section>`; }
-function renderHome() { const cards = Object.entries(views).filter(([key]) => key !== 'home' && allowed(key)).map(([key, item]) => `<a class="pixel-card dashboard-card" href="/dashboard#${key}"><span class="icon" aria-hidden="true">${item.icon}</span><h3>${escapeHtml(item.label)}</h3></a>`).join(''); shell(L.home, L.home, L.dashboardDesc, `<div class="grid two">${cards}</div>`); }
+function renderHome() { const cards = Object.entries(views).filter(([key]) => key !== 'home' && allowed(key)).map(([key, item]) => `<a class="pixel-card dashboard-card" href="/dashboard#${key}"><span class="icon" aria-hidden="true">${iconSvg(item.icon)}</span><h3>${escapeHtml(item.label)}</h3></a>`).join(''); shell(L.home, L.home, L.dashboardDesc, `<div class="grid two">${cards}</div>`); }
 async function renderFiles() { state.selectedFiles.clear(); shell(L.files, L.files, L.filesDesc, `<div class="toolbar"><label class="sr-only" for="files-q">${escapeHtml(L.searchFiles)}</label><input id="files-q" class="input" autocomplete="off" placeholder="${escapeAttr(L.searchFiles)}" /><label class="page-size"><span>${escapeHtml(L.pageSize)}</span><select id="files-size" class="input"><option>10</option><option selected>20</option><option>50</option></select></label></div><div class="bulk-bar"><label><input type="checkbox" data-select-page="files" /> ${escapeHtml(L.selectAll)}</label><span id="files-selected">0 ${escapeHtml(L.selected)}</span><button class="pixel-button compact" data-bulk-share="files" type="button">${escapeHtml(L.bulkShare)}</button><button class="pixel-button danger compact" data-bulk-delete="files" type="button">${escapeHtml(L.bulkDelete)}</button></div><div id="files-list" class="data-list list-frame" aria-live="polite">${skeletonCards(6)}</div><div id="files-pager" class="pager"></div>`); const q = document.querySelector('#files-q'); const size = document.querySelector('#files-size'); q.addEventListener('input', debounce(() => loadFiles(q.value), 180)); size.addEventListener('change', () => { state.fileVisible = Number(size.value || 20); renderFileList(); }); await loadFiles(''); }
 async function loadFiles(query) { const list = document.querySelector('#files-list'); list.innerHTML = skeletonCards(6); const json = await api('/api/files?q=' + encodeURIComponent(query || '') + '&limit=200'); state.files = json.files || []; state.selectedFiles.clear(); renderFileList(); }
 function renderFileList() { const visible = state.files.slice(0, state.fileVisible); document.querySelector('#files-list').innerHTML = visible.map((f) => fileCard(f, 'files')).join('') || empty(L.emptyFiles); document.querySelector('#files-pager').innerHTML = pagerHTML(visible.length, state.files.length, 'files'); updateBulkUI('files'); }
@@ -234,6 +243,7 @@ function skeletonCards(count) { return Array.from({ length: count }, () => '<art
 function skeletonAudit(count) { return Array.from({ length: count }, () => '<article class="audit-card skeleton-card"><div><span></span><p></p></div><div><span></span><p></p><small></small></div><div><span></span><p></p></div></article>').join(''); }
 function skeletonFields(count) { return Array.from({ length: count }, () => '<label class="skeleton-field"><span></span><i></i></label>').join(''); }
 function pagerHTML(showing, total, scope) { return total > showing ? `<span>${escapeHtml(L.showing)} ${showing}/${total}</span><button class="pixel-button secondary compact" type="button" data-load-more="${scope}">${escapeHtml(L.loadMore)}</button>` : `<span>${escapeHtml(L.showing)} ${showing}/${total}</span>`; }
+function iconSvg(name) { return `<svg class="ui-icon" viewBox="0 0 24 24" role="img" aria-hidden="true">${iconPaths[name] || iconPaths.files}</svg>`; }
 function parseRegionPolicy(value) {
   const raw = String(value || 'global').trim();
   const match = raw.match(/^(allow|deny):(.+)$/i);
