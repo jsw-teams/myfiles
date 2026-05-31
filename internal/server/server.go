@@ -13,6 +13,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 type App struct {
 	mu          sync.RWMutex
 	chunkMu     sync.Mutex
+	videoMu     sync.Mutex
 	cfg         config.Config
 	configPath  string
 	db          *sql.DB
@@ -1382,6 +1384,305 @@ func (a *App) serveStoredFile(w http.ResponseWriter, r *http.Request, f myfiles.
 	http.NotFound(w, r)
 }
 
+func (a *App) serveFaststartVideo(w http.ResponseWriter, r *http.Request, f myfiles.File) {
+	if !shouldUseFaststartPreview(f) {
+		a.serveStoredFile(w, r, f, true)
+		return
+	}
+	path, err := a.faststartVideoPath(r.Context(), f)
+	if err != nil {
+		log.Printf("faststart preview unavailable: id=%s err=%v", f.ID, err)
+		a.serveStoredFile(w, r, f, true)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Content-Disposition", contentDisposition(r, f))
+	setStoredFileCacheHeaders(w, f, true)
+	http.ServeFile(w, r, path)
+}
+
+type mseManifest struct {
+	MIME     string       `json:"mime"`
+	Init     string       `json:"init"`
+	Segments []mseSegment `json:"segments"`
+}
+
+type mseSegment struct {
+	URL      string  `json:"url"`
+	Duration float64 `json:"duration"`
+}
+
+func (a *App) handlePublicMSEVideo(w http.ResponseWriter, r *http.Request, rest string) {
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) < 2 {
+		http.NotFound(w, r)
+		return
+	}
+	id := publicFileID(parts[0])
+	f, err := myfiles.GetFile(a.db, id, false)
+	if err != nil || !f.IsPublic || f.Status != "active" || !shouldUseMSEPreview(f) {
+		http.NotFound(w, r)
+		return
+	}
+	dir, manifest, err := a.mseVideoManifest(r.Context(), f)
+	if err != nil {
+		log.Printf("mse preview unavailable: id=%s err=%v", f.ID, err)
+		http.NotFound(w, r)
+		return
+	}
+	name := parts[1]
+	switch name {
+	case "manifest.json":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		setStoredFileCacheHeaders(w, f, true)
+		_ = json.NewEncoder(w).Encode(manifest)
+	case "init.mp4":
+		w.Header().Set("Content-Type", "video/mp4")
+		setStoredFileCacheHeaders(w, f, true)
+		http.ServeFile(w, r, filepath.Join(dir, name))
+	default:
+		if !strings.HasPrefix(name, "seg_") || !strings.HasSuffix(name, ".m4s") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "video/iso.segment")
+		setStoredFileCacheHeaders(w, f, true)
+		http.ServeFile(w, r, filepath.Join(dir, name))
+	}
+}
+
+func (a *App) mseVideoManifest(ctx context.Context, f myfiles.File) (string, mseManifest, error) {
+	cfg := a.snapshotConfig()
+	version := strings.Trim(fileEntityTag(f), `"`)
+	cacheDir := filepath.Join(cfg.App.DataDir, "video-cache", "mse", f.ID+"-"+version)
+	playlist := filepath.Join(cacheDir, "index.m3u8")
+	manifestPath := filepath.Join(cacheDir, "manifest.json")
+	if data, err := os.ReadFile(manifestPath); err == nil {
+		var manifest mseManifest
+		if json.Unmarshal(data, &manifest) == nil && len(manifest.Segments) > 0 {
+			return cacheDir, manifest, nil
+		}
+	}
+
+	a.videoMu.Lock()
+	defer a.videoMu.Unlock()
+	if data, err := os.ReadFile(manifestPath); err == nil {
+		var manifest mseManifest
+		if json.Unmarshal(data, &manifest) == nil && len(manifest.Segments) > 0 {
+			return cacheDir, manifest, nil
+		}
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", mseManifest{}, err
+	}
+	inputPath, cleanup, err := a.faststartInputPath(ctx, f)
+	if err != nil {
+		return "", mseManifest{}, err
+	}
+	defer cleanup()
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", inputPath, "-c", "copy", "-f", "hls", "-hls_time", "4", "-hls_segment_type", "fmp4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments", "-hls_fmp4_init_filename", "init.mp4", "-hls_segment_filename", filepath.Join(cacheDir, "seg_%05d.m4s"), playlist)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", mseManifest{}, fmt.Errorf("ffmpeg fmp4 failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	codecs, err := mp4Codecs(ctx, inputPath)
+	if err != nil {
+		return "", mseManifest{}, err
+	}
+	segments, err := parseMSEPlaylist(playlist, f.ID, version)
+	if err != nil {
+		return "", mseManifest{}, err
+	}
+	manifest := mseManifest{
+		MIME:     `video/mp4; codecs="` + strings.Join(codecs, ", ") + `"`,
+		Init:     "/files/mse/" + url.PathEscape(f.ID) + "/init.mp4?v=" + url.QueryEscape(version),
+		Segments: segments,
+	}
+	data, _ := json.Marshal(manifest)
+	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
+		return "", mseManifest{}, err
+	}
+	return cacheDir, manifest, nil
+}
+
+func parseMSEPlaylist(path, id, version string) ([]mseSegment, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(data), "\n")
+	var duration float64
+	var segments []mseSegment
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "#EXTINF:") {
+			value := strings.TrimSuffix(strings.TrimPrefix(line, "#EXTINF:"), ",")
+			duration, _ = strconv.ParseFloat(value, 64)
+			continue
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasSuffix(line, ".m4s") {
+			segments = append(segments, mseSegment{
+				URL:      "/files/mse/" + url.PathEscape(id) + "/" + url.PathEscape(line) + "?v=" + url.QueryEscape(version),
+				Duration: duration,
+			})
+		}
+	}
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("empty mse playlist")
+	}
+	return segments, nil
+}
+
+func mp4Codecs(ctx context.Context, source string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_streams", "-of", "json", source)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var probed struct {
+		Streams []struct {
+			CodecName string `json:"codec_name"`
+			CodecType string `json:"codec_type"`
+			Profile   string `json:"profile"`
+			Level     int    `json:"level"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &probed); err != nil {
+		return nil, err
+	}
+	var codecs []string
+	for _, stream := range probed.Streams {
+		switch stream.CodecType {
+		case "video":
+			if stream.CodecName == "h264" {
+				codecs = append(codecs, h264CodecString(stream.Profile, stream.Level))
+			}
+		case "audio":
+			if stream.CodecName == "aac" {
+				codecs = append(codecs, "mp4a.40.2")
+			}
+		}
+	}
+	if len(codecs) == 0 {
+		return nil, fmt.Errorf("unsupported mp4 codecs")
+	}
+	return codecs, nil
+}
+
+func h264CodecString(profile string, level int) string {
+	profileHex := "42E0"
+	switch strings.ToLower(profile) {
+	case "main":
+		profileHex = "4D40"
+	case "high":
+		profileHex = "6400"
+	}
+	if level <= 0 {
+		level = 30
+	}
+	return fmt.Sprintf("avc1.%s%02X", profileHex, level)
+}
+
+func (a *App) faststartVideoPath(ctx context.Context, f myfiles.File) (string, error) {
+	cfg := a.snapshotConfig()
+	cacheDir := filepath.Join(cfg.App.DataDir, "video-cache", "faststart")
+	cacheName := f.ID + "-" + strings.Trim(fileEntityTag(f), `"`) + ".mp4"
+	outPath := filepath.Join(cacheDir, cacheName)
+	if st, err := os.Stat(outPath); err == nil && st.Size() > 0 {
+		return outPath, nil
+	}
+
+	a.videoMu.Lock()
+	defer a.videoMu.Unlock()
+	if st, err := os.Stat(outPath); err == nil && st.Size() > 0 {
+		return outPath, nil
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", err
+	}
+	inputPath, cleanup, err := a.faststartInputPath(ctx, f)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	tmpOut := outPath + ".tmp"
+	_ = os.Remove(tmpOut)
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", inputPath, "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmpOut)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(tmpOut)
+		return "", fmt.Errorf("ffmpeg faststart failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if err := os.Rename(tmpOut, outPath); err != nil {
+		_ = os.Remove(tmpOut)
+		return "", err
+	}
+	return outPath, nil
+}
+
+func (a *App) faststartInputPath(ctx context.Context, f myfiles.File) (string, func(), error) {
+	if f.StorageProvider == "local" && f.StorageURL != "" {
+		return f.StorageURL, func() {}, nil
+	}
+	tmpDir := a.snapshotConfig().App.TempDir
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return "", func() {}, err
+	}
+	tmp, err := os.CreateTemp(tmpDir, "faststart-source-*.mp4")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() {
+		_ = os.Remove(tmp.Name())
+	}
+	defer tmp.Close()
+
+	var resp *http.Response
+	switch {
+	case f.StorageProvider == "tgbots" && f.StorageFileID != "":
+		cfg := a.snapshotConfig()
+		if !storage.ValidBotToken(cfg.Storage.APIKey) {
+			cleanup()
+			return "", func() {}, fmt.Errorf("invalid storage token")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, storage.FetchURL(cfg.Storage.UploadURL, cfg.Storage.APIKey, f.StorageFileID), nil)
+		if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		resp, err = storage.NewTGBotsHTTPClient(cfg.Storage).Do(req)
+		if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+	case f.StorageURL != "":
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.StorageURL, nil)
+		if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+	default:
+		cleanup()
+		return "", func() {}, fmt.Errorf("no storage source")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		cleanup()
+		return "", func() {}, fmt.Errorf("source returned %s", resp.Status)
+	}
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return tmp.Name(), cleanup, nil
+}
+
 func contentDisposition(r *http.Request, f myfiles.File) string {
 	mode := "inline"
 	if strings.HasSuffix(strings.Trim(r.URL.Path, "/"), "/download") {
@@ -1711,7 +2012,8 @@ func (a *App) handlePublicFile(w http.ResponseWriter, r *http.Request) {
 	raw := strings.HasPrefix(rest, "raw/")
 	if raw {
 		rest = strings.TrimPrefix(rest, "raw/")
-	} else if strings.HasSuffix(rest, "/raw") {
+	}
+	if strings.HasSuffix(rest, "/raw") {
 		raw = true
 		rest = strings.TrimSuffix(rest, "/raw")
 	}
@@ -1915,6 +2217,14 @@ func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfile
 	})
 }
 
+func shouldUseFaststartPreview(f myfiles.File) bool {
+	return mediaKind(f.MIME, f.OriginalName) == "video" && strings.EqualFold(filepath.Ext(f.OriginalName), ".mp4")
+}
+
+func shouldUseMSEPreview(f myfiles.File) bool {
+	return shouldUseFaststartPreview(f)
+}
+
 type previewLinks struct {
 	MediaURL    string
 	PreviewURL  string
@@ -1971,7 +2281,7 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 		if poster != "" {
 			posterAttr = fmt.Sprintf(` poster="%s"`, html.EscapeString(poster))
 		}
-		fmt.Fprintf(&media, `<div class="video-shell"><video data-caption-media controls playsinline preload="metadata"%s><source src="%s" type="%s"></video><div class="caption-overlay" data-caption-live aria-live="polite"></div></div>%s`, posterAttr, html.EscapeString(mediaURL), html.EscapeString(contentType), captionControls())
+		fmt.Fprintf(&media, `<div class="video-shell"><video data-caption-media data-audio-track-media controls playsinline preload="metadata"%s><source src="%s" type="%s"></video><div class="caption-overlay" data-caption-live aria-live="polite"></div></div><div class="native-audio-tools" data-native-audio-tools><label for="native-audio-track">音轨</label><select id="native-audio-track" data-native-audio-select><option value="">原生音轨</option></select></div>%s`, posterAttr, html.EscapeString(mediaURL), html.EscapeString(contentType), captionControls())
 	case "audio":
 		fmt.Fprintf(&media, `<div class="audio-card"><div class="audio-art">%s</div><strong>%s</strong><audio data-caption-media controls preload="metadata"><source src="%s" type="%s"></audio><div class="caption-panel" data-caption-live aria-live="polite"></div>%s</div>`, html.EscapeString(fileIcon(f.MIME, f.OriginalName)), html.EscapeString(title), html.EscapeString(mediaURL), html.EscapeString(contentType), captionControls())
 	default:
@@ -2053,7 +2363,7 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 %s
 %s
 <style>
-*{box-sizing:border-box}html,body{margin:0;min-height:100%%;background:#0f1115;color:#f7f3e8;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body.preview{min-height:100vh;display:grid;grid-template-rows:auto 1fr;background:#11151b}header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 24px;border-bottom:1px solid rgba(255,255,255,.12);background:#171c23}header div{min-width:0}span{display:block;color:#9eb5c7;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}h1{margin:0 0 4px;font-size:clamp(20px,3vw,34px);line-height:1.15;overflow-wrap:anywhere}h2{margin:0;font-size:22px;line-height:1.2;overflow-wrap:anywhere}p{margin:0;color:#bec8d2;font-size:14px}form{margin:0}a,button{border:1px solid rgba(255,255,255,.28);border-radius:6px;color:#f7f3e8;background:transparent;text-decoration:none;padding:9px 12px;font:inherit;font-weight:800;cursor:pointer}.stage{width:100%%;min-height:0;display:grid;place-items:center;gap:14px;padding:20px;contain:layout paint}.embed .stage{height:100vh;padding:0}.pswp-gallery{width:100%%;display:grid;place-items:center}.pswp-gallery a{display:block;border:0;padding:0;line-height:0}.pswp-gallery img{display:block;max-width:100%%;max-height:calc(100vh - 132px);object-fit:contain;background:#06080b}.video-shell{position:relative;width:min(100%%,1280px);contain:layout paint}.video-shell video{display:block;width:100%%;max-height:calc(100vh - 188px);aspect-ratio:16/9;object-fit:contain;background:#06080b;border-radius:8px}.embed .video-shell,.embed video{width:100%%;height:100vh;max-height:none;border-radius:0}.caption-overlay{position:absolute;left:50%%;bottom:18px;transform:translateX(-50%%);max-width:min(92%%,980px);padding:7px 12px;border-radius:6px;background:rgba(0,0,0,.68);color:#fff;font-size:clamp(16px,2vw,24px);line-height:1.35;text-align:center;white-space:pre-wrap;pointer-events:none}.caption-overlay:empty{display:none}.caption-tools{width:min(100%%,720px);display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px}.caption-tools input[type=url],.caption-tools input[type=file]{min-width:0;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:#10151b;color:#f7f3e8;padding:9px 10px;font:inherit}.caption-file{display:grid;place-items:center;border:1px solid rgba(255,255,255,.28);border-radius:6px;padding:0 12px;font-weight:800;cursor:pointer}.caption-file input{position:absolute;inline-size:1px;block-size:1px;opacity:0}.audio-card,.file-card{width:min(720px,calc(100%% - 32px));display:grid;gap:16px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#171c23;padding:20px}.audio-art{width:92px;height:92px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.22);border-radius:8px;background:#222b35;color:#ffd44d;font-size:32px;font-weight:900}.audio-card strong{overflow-wrap:anywhere}.audio-card audio{width:100%%}.caption-panel{min-height:58px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:#10151b;color:#f7f3e8;padding:12px;text-align:center;white-space:pre-wrap;line-height:1.45}.caption-panel:empty{display:none}.file-icon{width:64px;height:64px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.24);border-radius:8px;background:#222b35;color:#ffd44d;font-size:24px;font-weight:900}.file-card dl{display:grid;gap:8px;margin:0}.file-card div{display:grid;grid-template-columns:72px minmax(0,1fr);gap:10px}.file-card dt{color:#9eb5c7;font-weight:800}.file-card dd{margin:0;overflow-wrap:anywhere}.download-primary{width:max-content;background:#ffd44d;color:#15120a;border-color:#ffd44d}@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.stage{padding:12px}.pswp-gallery img,.video-shell video{max-height:calc(100vh - 210px)}.caption-tools{grid-template-columns:1fr 1fr}.caption-tools input[type=url]{grid-column:1/-1}}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%%;background:#0f1115;color:#f7f3e8;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body.preview{min-height:100vh;display:grid;grid-template-rows:auto 1fr;background:#11151b}header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 24px;border-bottom:1px solid rgba(255,255,255,.12);background:#171c23}header div{min-width:0}span{display:block;color:#9eb5c7;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}h1{margin:0 0 4px;font-size:clamp(20px,3vw,34px);line-height:1.15;overflow-wrap:anywhere}h2{margin:0;font-size:22px;line-height:1.2;overflow-wrap:anywhere}p{margin:0;color:#bec8d2;font-size:14px}form{margin:0}a,button{border:1px solid rgba(255,255,255,.28);border-radius:6px;color:#f7f3e8;background:transparent;text-decoration:none;padding:9px 12px;font:inherit;font-weight:800;cursor:pointer}.stage{width:100%%;min-height:0;display:grid;place-items:center;gap:14px;padding:20px;contain:layout paint}.embed .stage{height:100vh;padding:0}.pswp-gallery{width:100%%;display:grid;place-items:center}.pswp-gallery a{display:block;border:0;padding:0;line-height:0}.pswp-gallery img{display:block;max-width:100%%;max-height:calc(100vh - 132px);object-fit:contain;background:#06080b}.video-shell{position:relative;width:min(100%%,1280px);contain:layout paint}.video-shell video{display:block;width:100%%;max-height:calc(100vh - 188px);aspect-ratio:16/9;object-fit:contain;background:#06080b;border-radius:8px}.embed .video-shell,.embed video{width:100%%;height:100vh;max-height:none;border-radius:0}.caption-overlay{position:absolute;left:50%%;bottom:18px;transform:translateX(-50%%);max-width:min(92%%,980px);padding:7px 12px;border-radius:6px;background:rgba(0,0,0,.68);color:#fff;font-size:clamp(16px,2vw,24px);line-height:1.35;text-align:center;white-space:pre-wrap;pointer-events:none}.caption-overlay:empty{display:none}.caption-tools,.native-audio-tools{width:min(100%%,720px);display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px}.native-audio-tools{grid-template-columns:auto minmax(0,1fr);align-items:center}.native-audio-tools label{color:#9eb5c7;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.native-audio-tools select,.caption-tools input[type=url],.caption-tools input[type=file]{min-width:0;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:#10151b;color:#f7f3e8;padding:9px 10px;font:inherit}.caption-file{display:grid;place-items:center;border:1px solid rgba(255,255,255,.28);border-radius:6px;padding:0 12px;font-weight:800;cursor:pointer}.caption-file input{position:absolute;inline-size:1px;block-size:1px;opacity:0}.audio-card,.file-card{width:min(720px,calc(100%% - 32px));display:grid;gap:16px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#171c23;padding:20px}.audio-art{width:92px;height:92px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.22);border-radius:8px;background:#222b35;color:#ffd44d;font-size:32px;font-weight:900}.audio-card strong{overflow-wrap:anywhere}.audio-card audio{width:100%%}.caption-panel{min-height:58px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:#10151b;color:#f7f3e8;padding:12px;text-align:center;white-space:pre-wrap;line-height:1.45}.caption-panel:empty{display:none}.file-icon{width:64px;height:64px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.24);border-radius:8px;background:#222b35;color:#ffd44d;font-size:24px;font-weight:900}.file-card dl{display:grid;gap:8px;margin:0}.file-card div{display:grid;grid-template-columns:72px minmax(0,1fr);gap:10px}.file-card dt{color:#9eb5c7;font-weight:800}.file-card dd{margin:0;overflow-wrap:anywhere}.download-primary{width:max-content;background:#ffd44d;color:#15120a;border-color:#ffd44d}@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.stage{padding:12px}.pswp-gallery img,.video-shell video{max-height:calc(100vh - 210px)}.caption-tools{grid-template-columns:1fr 1fr}.caption-tools input[type=url]{grid-column:1/-1}.native-audio-tools{grid-template-columns:1fr}}
 </style>
 </head>
 <body class="%s">
@@ -2072,7 +2382,7 @@ func imagePreviewSize(f myfiles.File) (int, int) {
 }
 
 func captionControls() string {
-	return `<div class="caption-tools"><input data-caption-url type="url" inputmode="url" placeholder="字幕 URL"><button data-caption-load type="button">加载</button><label class="caption-file">文件<input data-caption-file type="file" accept=".vtt,.srt,.lrc,text/vtt,application/x-subrip,text/plain"></label></div>`
+	return `<div class="caption-tools"><input id="caption-url" name="subtitle" data-caption-url type="url" inputmode="url" placeholder="字幕 URL"><button data-caption-load type="button">加载</button><label class="caption-file" for="caption-file-input">文件<input id="caption-file-input" name="caption_file" data-caption-file type="file" accept=".vtt,.srt,.lrc,text/vtt,application/x-subrip,text/plain"></label></div>`
 }
 
 func previewSubtitleURL(r *http.Request) string {
@@ -2100,11 +2410,16 @@ lightbox.init();
 		encodedURL, _ := json.Marshal(subtitleURL)
 		return `<script>
 const initialSubtitleURL = ` + string(encodedURL) + `;
-const media = document.querySelector("[data-caption-media]");
+let media = document.querySelector("[data-caption-media]");
 const live = document.querySelector("[data-caption-live]");
 const input = document.querySelector("[data-caption-url]");
 const loadButton = document.querySelector("[data-caption-load]");
 const fileInput = document.querySelector("[data-caption-file]");
+const nativeAudioTools = document.querySelector("[data-native-audio-tools]");
+const nativeAudioSelect = document.querySelector("[data-native-audio-select]");
+const bufferNative = document.querySelector("[data-buffer-native]");
+const bufferPrefetch = document.querySelector("[data-buffer-prefetch]");
+const bufferPlayed = document.querySelector("[data-buffer-played]");
 let cues = [];
 let activeIndex = -1;
 function toSeconds(raw) {
@@ -2192,10 +2507,267 @@ if (fileInput) {
     reader.readAsText(file);
   });
 }
-if (media) {
+function audioTrackLabel(track, index) {
+  return track.label || track.language || (index === 0 ? "原生音轨" : "音轨 " + (index + 1));
+}
+function setupNativeAudioTracks() {
+  if (!media || !nativeAudioTools || !nativeAudioSelect) return;
+  const tracks = media.audioTracks;
+  function renderTracks() {
+    nativeAudioSelect.textContent = "";
+    if (!tracks || typeof tracks.length !== "number" || tracks.length === 0) {
+      nativeAudioSelect.add(new Option("原生音轨", ""));
+      nativeAudioSelect.disabled = true;
+      return;
+    }
+    nativeAudioSelect.disabled = false;
+    let selected = 0;
+    for (let i = 0; i < tracks.length; i += 1) {
+      const track = tracks[i];
+      if (track.enabled) selected = i;
+      nativeAudioSelect.add(new Option(audioTrackLabel(track, i), String(i)));
+    }
+    nativeAudioSelect.value = String(selected);
+  }
+  function selectTrack() {
+    if (!tracks || typeof tracks.length !== "number" || tracks.length === 0) return;
+    const selected = Number(nativeAudioSelect.value);
+    for (let i = 0; i < tracks.length; i += 1) {
+      tracks[i].enabled = i === selected;
+    }
+  }
+  nativeAudioSelect.addEventListener("change", selectTrack);
+  if (tracks && typeof tracks.addEventListener === "function") {
+    tracks.addEventListener("addtrack", renderTracks);
+    tracks.addEventListener("removetrack", renderTracks);
+    tracks.addEventListener("change", renderTracks);
+  }
+  renderTracks();
+}
+function bindMediaControls(boundMedia, manageBuffer) {
+  if (!boundMedia || boundMedia.dataset.captionBound === "1") return;
+  media = boundMedia;
+  media.dataset.captionBound = "1";
   media.addEventListener("timeupdate", updateCaption);
   media.addEventListener("seeked", updateCaption);
+  if (!manageBuffer) return;
+  let shouldResumeAfterBuffer = false;
+  let lastPlayRequestAt = 0;
+  let resumeTimer = 0;
+  const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  const prefetchSrc = media.dataset.bufferPrefetchSrc || "";
+  const prefetchSize = Number(media.dataset.bufferPrefetchSize || "0");
+  let prefetching = false;
+  let prefetchTimer = 0;
+  let nextPrefetchByte = 0;
+  let confirmedPrefetchByte = 0;
+  function bufferedAhead() {
+    const ranges = media.buffered;
+    const current = media.currentTime;
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (ranges.start(i) <= current + 0.25 && ranges.end(i) > current) {
+        return ranges.end(i) - current;
+      }
+    }
+    return 0;
+  }
+  function nativeBufferedEnd() {
+    let end = 0;
+    for (let i = 0; i < media.buffered.length; i += 1) {
+      if (media.buffered.end(i) > end) end = media.buffered.end(i);
+    }
+    return end;
+  }
+  function playbackRate() {
+    return Math.max(0.25, Math.abs(media.playbackRate || 1));
+  }
+  function bufferPlanningRate() {
+    return playbackRate();
+  }
+  function highRateBufferMultiplier(rate) {
+    if (rate >= 2) return 1.75;
+    if (rate >= 1.5) return 1.45;
+    if (rate > 1) return 1.2 + (rate - 1) * 0.5;
+    return 1;
+  }
+  function resumeThresholdSeconds() {
+    const rate = bufferPlanningRate();
+    let seconds = 4;
+    if (connection) {
+      const type = String(connection.effectiveType || "");
+      if (type === "slow-2g" || type === "2g") seconds = 12;
+      else if (type === "3g") seconds = 8;
+      else if (type === "4g") seconds = 4;
+      const downlink = Number(connection.downlink);
+      if (Number.isFinite(downlink) && downlink > 0) {
+        if (downlink < 0.8) seconds = Math.max(seconds, 12);
+        else if (downlink < 1.5) seconds = Math.max(seconds, 8);
+        else if (downlink < 3) seconds = Math.max(seconds, 5);
+      }
+      const rtt = Number(connection.rtt);
+      if (Number.isFinite(rtt) && rtt > 600) seconds += 2;
+    }
+    if (rate > 1) {
+      seconds = Math.max(seconds, 6 + (rate - 1) * 4);
+    }
+    return Math.min(45, Math.max(2.5, seconds * rate * highRateBufferMultiplier(rate)));
+  }
+  function canResumePlayback() {
+    if (!shouldResumeAfterBuffer || media.ended || media.seeking) return false;
+    const threshold = resumeThresholdSeconds();
+    const rate = bufferPlanningRate();
+    const ahead = bufferedAhead();
+    if (media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && ahead >= Math.max(0.35, 0.75 * rate)) {
+      return true;
+    }
+    if (prefetchedAhead() >= Math.max(2.5, 2 * rate)) {
+      return true;
+    }
+    return ahead >= threshold;
+  }
+  function prefetchedAhead() {
+    if (!prefetchSize || !Number.isFinite(media.duration) || media.duration <= 0) return 0;
+    const bytesPerSecond = prefetchSize / media.duration;
+    if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return 0;
+    const currentByte = Math.max(0, Math.floor(media.currentTime * bytesPerSecond));
+    return Math.max(0, (confirmedPrefetchByte - currentByte) / bytesPerSecond);
+  }
+  function confirmedPrefetchEndTime() {
+    if (!prefetchSize || !Number.isFinite(media.duration) || media.duration <= 0) return 0;
+    return Math.min(media.duration, (confirmedPrefetchByte / prefetchSize) * media.duration);
+  }
+  function setMeterWidth(element, seconds) {
+    if (!element || !Number.isFinite(media.duration) || media.duration <= 0) return;
+    element.style.width = Math.max(0, Math.min(100, (seconds / media.duration) * 100)) + "%";
+  }
+  function updateBufferMeter() {
+    setMeterWidth(bufferNative, nativeBufferedEnd());
+    setMeterWidth(bufferPrefetch, Math.max(nativeBufferedEnd(), confirmedPrefetchEndTime()));
+    setMeterWidth(bufferPlayed, media.currentTime || 0);
+  }
+  function prefetchTargetSeconds() {
+    const rate = bufferPlanningRate();
+    let seconds = rate > 1 ? 18 * rate : 10;
+    if (connection) {
+      const downlink = Number(connection.downlink);
+      if (Number.isFinite(downlink) && downlink > 0 && downlink < 1.5) seconds = Math.min(seconds, 24);
+    }
+    return Math.min(90, seconds);
+  }
+  function shouldPrefetchAhead() {
+    if (!prefetchSrc || !prefetchSize || !Number.isFinite(media.duration) || media.duration <= 0 || media.ended) return false;
+    const rate = bufferPlanningRate();
+    return rate > 1.01 || shouldResumeAfterBuffer || bufferedAhead() < Math.min(8, resumeThresholdSeconds());
+  }
+  function schedulePrefetchAhead(delay) {
+    window.clearTimeout(prefetchTimer);
+    if (!shouldPrefetchAhead()) return;
+    prefetchTimer = window.setTimeout(prefetchAhead, delay || 0);
+  }
+  async function prefetchAhead() {
+    if (prefetching || !shouldPrefetchAhead()) return;
+    const bytesPerSecond = prefetchSize / media.duration;
+    if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return;
+    const currentByte = Math.max(0, Math.floor(media.currentTime * bytesPerSecond));
+    if (nextPrefetchByte < currentByte || media.seeking) nextPrefetchByte = currentByte;
+    const start = Math.max(nextPrefetchByte, Math.floor((media.currentTime + Math.min(bufferedAhead() + 2, 18)) * bytesPerSecond));
+    const target = Math.min(prefetchSize - 1, Math.floor((media.currentTime + prefetchTargetSeconds()) * bytesPerSecond));
+    if (start >= target) return;
+    const chunkSeconds = bufferPlanningRate() >= 2 ? 18 : bufferPlanningRate() >= 1.5 ? 12 : 8;
+    const chunkSize = Math.max(384 * 1024, Math.ceil(bytesPerSecond * chunkSeconds * bufferPlanningRate()));
+    const end = Math.min(target, start + chunkSize - 1);
+    prefetching = true;
+    try {
+      const response = await fetch(prefetchSrc, {
+        headers: { Range: "bytes=" + start + "-" + end },
+        credentials: "same-origin",
+        cache: "force-cache"
+      });
+      if (response.ok || response.status === 206) {
+        await response.arrayBuffer();
+        nextPrefetchByte = end + 1;
+        confirmedPrefetchByte = Math.max(confirmedPrefetchByte, end + 1);
+        updateBufferMeter();
+      }
+    } catch (_) {
+      nextPrefetchByte = Math.min(prefetchSize - 1, end + 1);
+    } finally {
+      prefetching = false;
+      if (!media.paused || shouldResumeAfterBuffer) schedulePrefetchAhead(650);
+    }
+  }
+  function tryResumePlayback() {
+    window.clearTimeout(resumeTimer);
+    if (!canResumePlayback()) return;
+    const playResult = media.play();
+    if (playResult && typeof playResult.catch === "function") {
+      playResult.catch(() => {});
+    }
+  }
+  function scheduleResumeCheck() {
+    tryResumePlayback();
+    if (shouldResumeAfterBuffer && media.paused && !media.ended) {
+      resumeTimer = window.setTimeout(scheduleResumeCheck, 500);
+    }
+  }
+  media.addEventListener("play", () => {
+    lastPlayRequestAt = Date.now();
+    media.preload = "auto";
+    schedulePrefetchAhead(0);
+    updateBufferMeter();
+    shouldResumeAfterBuffer = false;
+  });
+  media.addEventListener("pause", () => {
+    if (Date.now() - lastPlayRequestAt > 900 && !media.seeking && !media.ended && bufferedAhead() > 0.5) {
+      shouldResumeAfterBuffer = false;
+    } else if (shouldResumeAfterBuffer && !media.ended) {
+      scheduleResumeCheck();
+    }
+  });
+  media.addEventListener("waiting", () => {
+    shouldResumeAfterBuffer = true;
+    schedulePrefetchAhead(0);
+    scheduleResumeCheck();
+  });
+  media.addEventListener("stalled", () => {
+    if (!media.paused || shouldResumeAfterBuffer) {
+      shouldResumeAfterBuffer = true;
+      schedulePrefetchAhead(0);
+      scheduleResumeCheck();
+    }
+  });
+  media.addEventListener("progress", () => {
+    updateBufferMeter();
+    schedulePrefetchAhead(250);
+    scheduleResumeCheck();
+  });
+  media.addEventListener("canplay", () => {
+    updateBufferMeter();
+    schedulePrefetchAhead(250);
+    scheduleResumeCheck();
+  });
+  media.addEventListener("canplaythrough", scheduleResumeCheck);
+  media.addEventListener("timeupdate", updateBufferMeter);
+  media.addEventListener("seeked", () => {
+    nextPrefetchByte = 0;
+    confirmedPrefetchByte = 0;
+    updateBufferMeter();
+    schedulePrefetchAhead(0);
+  });
+  media.addEventListener("ratechange", () => {
+    media.preload = "auto";
+    schedulePrefetchAhead(0);
+    scheduleResumeCheck();
+  });
+  updateBufferMeter();
+  if (media.readyState >= HTMLMediaElement.HAVE_METADATA) schedulePrefetchAhead(300);
+  else media.addEventListener("loadedmetadata", () => {
+    updateBufferMeter();
+    schedulePrefetchAhead(300);
+  }, { once: true });
 }
+bindMediaControls(media, true);
+setupNativeAudioTracks();
 if (initialSubtitleURL) loadCaptionURL(initialSubtitleURL).catch(() => setStatus("字幕加载失败"));
 </script>`
 	default:
@@ -2619,6 +3191,10 @@ func publicFilePath(id, name string) string {
 
 func publicRawFilePath(id, name string) string {
 	return "/files/raw/" + strings.TrimPrefix(publicFilePath(id, name), "/files/")
+}
+
+func publicFaststartFilePath(id, name string) string {
+	return "/files/faststart/" + strings.TrimPrefix(publicFilePath(id, name), "/files/")
 }
 
 func canonicalPublicURL(f myfiles.File) string {
