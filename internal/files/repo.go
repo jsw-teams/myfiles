@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ type File struct {
 	ImageHeight     *int   `json:"imageHeight,omitempty"`
 	StorageProvider string `json:"storageProvider"`
 	StorageFileID   string `json:"storageFileId"`
+	ThumbnailFileID string `json:"thumbnailFileId,omitempty"`
 	StorageURL      string `json:"storageUrl,omitempty"`
 	PublicURL       string `json:"publicUrl"`
 	IsPublic        bool   `json:"isPublic"`
@@ -70,6 +72,7 @@ type CreateFileInput struct {
 	ImageHeight     *int
 	StorageProvider string
 	StorageFileID   string
+	ThumbnailFileID string
 	StorageURL      string
 	PublicURL       string
 	IsPublic        bool
@@ -80,13 +83,20 @@ type CreateFileInput struct {
 
 func CreateBatch(conn *sql.DB, ownerUserID string) (Batch, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	expiresAt := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	expiresAt := ""
+	if strings.TrimSpace(ownerUserID) == "" {
+		expiresAt = time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	}
 	var lastErr error
 	for range 5 {
-		b := Batch{ID: ids.New("bat"), OwnerUserID: ownerUserID, PickupCode: NewPickupCode(), PickupExpiresAt: expiresAt, Status: "created", CreatedAt: now, UpdatedAt: now}
+		pickupCode := ""
+		if strings.TrimSpace(ownerUserID) == "" {
+			pickupCode = NewPickupCode()
+		}
+		b := Batch{ID: ids.New("bat"), OwnerUserID: ownerUserID, PickupCode: pickupCode, PickupExpiresAt: expiresAt, Status: "created", CreatedAt: now, UpdatedAt: now}
 		_, err := conn.Exec(`INSERT INTO upload_batches
 			(id, owner_user_id, pickup_code, pickup_expires_at, status, total_files, success_count, failed_count, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)`, b.ID, nullEmpty(ownerUserID), b.PickupCode, b.PickupExpiresAt, b.Status, now, now)
+			VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)`, b.ID, nullEmpty(ownerUserID), nullEmpty(b.PickupCode), nullEmpty(b.PickupExpiresAt), b.Status, now, now)
 		if err == nil {
 			return b, nil
 		}
@@ -130,13 +140,26 @@ func CreateFile(conn *sql.DB, in CreateFileInput) (File, error) {
 	}
 	_, err := conn.Exec(`INSERT INTO files
 		(id, batch_id, owner_user_id, original_name, stored_name, mime, size, sha256, image_width, image_height,
-		 storage_provider, storage_file_id, storage_url, public_url, is_public, require_confirm,
+		 storage_provider, storage_file_id, thumbnail_file_id, storage_url, public_url, is_public, require_confirm,
 		 region_policy, hotlink_policy, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
 		in.ID, nullEmpty(in.BatchID), nullEmpty(in.OwnerUserID), in.OriginalName, in.StoredName, in.MIME, in.Size, in.SHA256, iw, ih,
-		in.StorageProvider, in.StorageFileID, in.StorageURL, in.PublicURL, isPublic, requireConfirm, in.RegionPolicy, in.HotlinkPolicy, now, now)
+		in.StorageProvider, in.StorageFileID, in.ThumbnailFileID, in.StorageURL, in.PublicURL, isPublic, requireConfirm, in.RegionPolicy, in.HotlinkPolicy, now, now)
 	if err != nil {
-		return File{}, err
+		if strings.Contains(err.Error(), "thumbnail_file_id") {
+			log.Printf("files insert with thumbnail_file_id failed, retrying without thumbnail_file_id: %v", err)
+			_, err = conn.Exec(`INSERT INTO files
+				(id, batch_id, owner_user_id, original_name, stored_name, mime, size, sha256, image_width, image_height,
+				 storage_provider, storage_file_id, storage_url, public_url, is_public, require_confirm,
+				 region_policy, hotlink_policy, status, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+				in.ID, nullEmpty(in.BatchID), nullEmpty(in.OwnerUserID), in.OriginalName, in.StoredName, in.MIME, in.Size, in.SHA256, iw, ih,
+				in.StorageProvider, in.StorageFileID, in.StorageURL, in.PublicURL, isPublic, requireConfirm, in.RegionPolicy, in.HotlinkPolicy, now, now)
+		}
+		if err != nil {
+			log.Printf("files insert failed: id=%s name=%q mime=%q provider=%s storageFileID=%q thumbnailFileID=%q err=%v", in.ID, in.OriginalName, in.MIME, in.StorageProvider, in.StorageFileID, in.ThumbnailFileID, err)
+			return File{}, err
+		}
 	}
 	return GetFile(conn, in.ID, false)
 }
@@ -256,7 +279,7 @@ func GetShareByPickupCode(conn *sql.DB, code string) (PickupShare, []File, error
 		return PickupShare{}, nil, sql.ErrNoRows
 	}
 	rows, err := conn.Query(`SELECT f.id, COALESCE(f.batch_id,''), COALESCE(f.owner_user_id,''), f.original_name, f.stored_name, f.mime, f.size, f.sha256,
-		f.image_width, f.image_height, f.storage_provider, f.storage_file_id, COALESCE(f.storage_url,''), f.public_url,
+		f.image_width, f.image_height, f.storage_provider, f.storage_file_id, COALESCE(f.thumbnail_file_id,''), COALESCE(f.storage_url,''), f.public_url,
 		f.is_public, f.require_confirm, f.region_policy, f.hotlink_policy, f.status, f.created_at, f.updated_at
 		FROM files f
 		JOIN pickup_share_files sf ON sf.file_id = f.id
@@ -359,7 +382,7 @@ func ListFiles(conn *sql.DB, opt ListOptions) ([]File, error) {
 	}
 	args = append(args, opt.Limit, opt.Offset)
 	query := `SELECT id, COALESCE(batch_id,''), COALESCE(owner_user_id,''), original_name, stored_name, mime, size, sha256,
-		image_width, image_height, storage_provider, storage_file_id, COALESCE(storage_url,''), public_url,
+		image_width, image_height, storage_provider, storage_file_id, COALESCE(thumbnail_file_id,''), COALESCE(storage_url,''), public_url,
 		is_public, require_confirm, region_policy, hotlink_policy, status, created_at, updated_at
 		FROM files WHERE ` + strings.Join(where, " AND ") + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows, err := conn.Query(query, args...)
@@ -384,7 +407,7 @@ func GetFile(conn *sql.DB, id string, includeDeleted bool) (File, error) {
 		where += " AND status <> 'deleted'"
 	}
 	row := conn.QueryRow(`SELECT id, COALESCE(batch_id,''), COALESCE(owner_user_id,''), original_name, stored_name, mime, size, sha256,
-		image_width, image_height, storage_provider, storage_file_id, COALESCE(storage_url,''), public_url,
+		image_width, image_height, storage_provider, storage_file_id, COALESCE(thumbnail_file_id,''), COALESCE(storage_url,''), public_url,
 		is_public, require_confirm, region_policy, hotlink_policy, status, created_at, updated_at
 		FROM files WHERE `+where, id)
 	return scanFile(row)
@@ -439,7 +462,7 @@ func scanFile(s scanner) (File, error) {
 	var iw, ih sql.NullInt64
 	var isPublic, requireConfirm int
 	if err := s.Scan(&f.ID, &f.BatchID, &f.OwnerUserID, &f.OriginalName, &f.StoredName, &f.MIME, &f.Size, &f.SHA256,
-		&iw, &ih, &f.StorageProvider, &f.StorageFileID, &f.StorageURL, &f.PublicURL,
+		&iw, &ih, &f.StorageProvider, &f.StorageFileID, &f.ThumbnailFileID, &f.StorageURL, &f.PublicURL,
 		&isPublic, &requireConfirm, &f.RegionPolicy, &f.HotlinkPolicy, &f.Status, &f.CreatedAt, &f.UpdatedAt); err != nil {
 		return File{}, err
 	}

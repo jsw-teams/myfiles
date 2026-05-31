@@ -26,6 +26,7 @@ CREATE TABLE files (
   image_height INTEGER,
   storage_provider TEXT NOT NULL,
   storage_file_id TEXT NOT NULL,
+  thumbnail_file_id TEXT,
   storage_url TEXT,
   public_url TEXT NOT NULL,
   is_public INTEGER NOT NULL DEFAULT 1,

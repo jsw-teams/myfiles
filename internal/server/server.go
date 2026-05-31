@@ -10,14 +10,17 @@ import (
 	"html"
 	"image"
 	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
+	"image/jpeg"
+	"image/png"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,16 +35,32 @@ import (
 )
 
 type App struct {
-	mu         sync.RWMutex
-	cfg        config.Config
-	configPath string
-	db         *sql.DB
-	account    *account.Client
-	storage    storage.Uploader
+	mu          sync.RWMutex
+	chunkMu     sync.Mutex
+	cfg         config.Config
+	configPath  string
+	db          *sql.DB
+	account     *account.Client
+	storage     storage.Uploader
+	finalizeSem chan struct{}
 }
 
+const (
+	uploadChunkMinSize     = 512 * 1024
+	uploadChunkDefaultSize = 4 * 1024 * 1024
+	uploadChunkMaxSize     = 16 * 1024 * 1024
+	chunkUploadExpiry      = 30 * time.Minute
+)
+
 func New(cfg config.Config, database *sql.DB, accountClient *account.Client, uploader storage.Uploader) *App {
-	return &App{cfg: cfg, configPath: cfg.SourcePath, db: database, account: accountClient, storage: uploader}
+	return &App{cfg: cfg, configPath: cfg.SourcePath, db: database, account: accountClient, storage: uploader, finalizeSem: make(chan struct{}, uploadFinalizeConcurrency())}
+}
+
+func uploadFinalizeConcurrency() int {
+	if runtime.NumCPU() >= 8 {
+		return 2
+	}
+	return 1
 }
 
 func (a *App) Routes() http.Handler {
@@ -99,6 +118,14 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.handleLogout(w, r)
 	case p == "/api/upload":
 		a.handleUpload(w, r)
+	case p == "/api/upload/chunk/init":
+		a.handleChunkInit(w, r)
+	case p == "/api/upload/chunk/cancel":
+		a.handleChunkCancel(w, r)
+	case p == "/api/upload/chunk/complete":
+		a.handleChunkComplete(w, r)
+	case strings.HasPrefix(p, "/api/upload/chunk/"):
+		a.handleChunkPart(w, r)
 	case p == "/api/files":
 		a.handleFiles(w, r)
 	case p == "/api/files/batch":
@@ -125,20 +152,16 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.handleAdminSettings(w, r)
 	case p == "/api/admin/storage/test":
 		a.handleAdminStorageTest(w, r)
-	case p == "/download":
-		a.handleDownloadPage(w, r)
-	case strings.HasPrefix(p, "/view/"), strings.HasPrefix(p, "/preview/"), strings.HasPrefix(p, "/embed/"):
-		a.handlePublicPreview(w, r)
+	case strings.HasPrefix(p, "/files/"):
+		a.handlePublicFile(w, r)
 	case strings.HasPrefix(p, "/og/"):
 		a.handlePublicOGImage(w, r)
-	case strings.HasPrefix(p, "/file/"), strings.HasPrefix(p, "/f/"):
-		a.handlePublicFile(w, r)
 	case strings.HasPrefix(p, "/pickup/"):
 		a.handlePickupFile(w, r)
 	case isLegacyConsolePath(p):
 		http.Redirect(w, r, legacyConsoleTarget(p), http.StatusFound)
 	case strings.HasPrefix(p, "/uploads"):
-		a.redirectLegacyUploadResult(w, r)
+		a.serveFrontend(w, r)
 	default:
 		a.serveFrontend(w, r)
 	}
@@ -347,9 +370,481 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"pickupExpiresAt": batch.PickupExpiresAt,
 		"status":          status,
 		"items":           items,
-		"resultPath":      "/?upload=" + url.QueryEscape(batch.ID),
-		"downloadPath":    "/download?upload=" + url.QueryEscape(batch.ID),
+		"resultPath":      "/uploads/" + url.PathEscape(batch.ID),
+		"downloadPath":    "/uploads/" + url.PathEscape(batch.ID),
 	})
+}
+
+type chunkUploadManifest struct {
+	ID        string            `json:"id"`
+	BatchID   string            `json:"batchId"`
+	Owner     string            `json:"owner"`
+	Role      string            `json:"role"`
+	CreatedAt string            `json:"createdAt"`
+	UpdatedAt string            `json:"updatedAt"`
+	ExpiresAt string            `json:"expiresAt"`
+	ChunkSize int64             `json:"chunkSize"`
+	Files     []chunkUploadFile `json:"files"`
+	Received  map[string][]bool `json:"received"`
+}
+
+type chunkUploadFile struct {
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	Type       string `json:"type,omitempty"`
+	Chunks     int    `json:"chunks"`
+	UploadedAt string `json:"uploadedAt,omitempty"`
+}
+
+func (a *App) handleChunkInit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	policy := a.effectiveUploadPolicy()
+	s, _ := a.readSession(r)
+	if s == nil && !policy.AllowAnonymous {
+		writeError(w, 401, "unauthorized", "请先登录后上传", nil)
+		return
+	}
+	var body struct {
+		UploadID  string `json:"uploadId"`
+		ChunkSize int64  `json:"chunkSize"`
+		Files     []struct {
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+			Type string `json:"type"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		writeError(w, 400, "bad_request", "上传初始化参数无效", nil)
+		return
+	}
+	if len(body.Files) == 0 {
+		writeError(w, 400, "file_required", "没有收到文件", nil)
+		return
+	}
+	for _, f := range body.Files {
+		if f.Size < 0 || f.Size > policy.MaxBytes {
+			writeError(w, 413, "upload_too_large", "文件超过当前允许的上传限制", nil)
+			return
+		}
+	}
+	owner, role := "", ""
+	if s != nil {
+		owner = s.User.ID
+		role = s.User.Role
+	}
+	chunkSize := normalizeUploadChunkSize(body.ChunkSize)
+	if err := a.cleanupOldChunkUploads(); err != nil {
+		writeError(w, 500, "temp_create_failed", "清理临时上传目录失败", nil)
+		return
+	}
+	if strings.TrimSpace(body.UploadID) != "" {
+		a.chunkMu.Lock()
+		manifest, err := a.loadChunkManifest(body.UploadID)
+		if err == nil && !manifest.expired(time.Now()) && manifest.Owner == owner && manifest.chunkSize() == chunkSize && manifest.matchesFiles(body.Files) {
+			manifest.touch(time.Now())
+			if err := a.saveChunkManifest(manifest); err != nil {
+				a.chunkMu.Unlock()
+				writeError(w, 500, "temp_create_failed", "写入上传状态失败", nil)
+				return
+			}
+			a.chunkMu.Unlock()
+			writeJSON(w, 200, map[string]any{
+				"ok": true, "resumed": true, "uploadId": manifest.ID, "batchId": manifest.BatchID,
+				"chunkSize": manifest.chunkSize(), "received": manifest.Received, "expiresAt": manifest.ExpiresAt,
+			})
+			return
+		}
+		_ = os.RemoveAll(a.chunkUploadDir(body.UploadID))
+		a.chunkMu.Unlock()
+	}
+	batch, err := myfiles.CreateBatch(a.db, owner)
+	if err != nil {
+		writeError(w, 500, "db_error", "创建上传批次失败", nil)
+		return
+	}
+	uploadID := ids.New("upl")
+	now := time.Now()
+	manifest := chunkUploadManifest{
+		ID: uploadID, BatchID: batch.ID, Owner: owner, Role: role,
+		CreatedAt: now.UTC().Format(time.RFC3339),
+		UpdatedAt: now.UTC().Format(time.RFC3339),
+		ExpiresAt: now.Add(chunkUploadExpiry).UTC().Format(time.RFC3339),
+		ChunkSize: chunkSize,
+		Received:  map[string][]bool{},
+	}
+	for _, f := range body.Files {
+		chunks := int((f.Size + chunkSize - 1) / chunkSize)
+		if chunks == 0 {
+			chunks = 1
+		}
+		idx := len(manifest.Files)
+		manifest.Files = append(manifest.Files, chunkUploadFile{Name: filepath.Base(f.Name), Size: f.Size, Type: f.Type, Chunks: chunks})
+		manifest.Received[strconv.Itoa(idx)] = make([]bool, chunks)
+	}
+	if err := os.MkdirAll(a.chunkUploadDir(uploadID), 0750); err != nil {
+		writeError(w, 500, "temp_create_failed", "创建临时上传目录失败", nil)
+		return
+	}
+	if err := a.saveChunkManifest(manifest); err != nil {
+		writeError(w, 500, "temp_create_failed", "写入上传状态失败", nil)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "uploadId": uploadID, "batchId": batch.ID, "chunkSize": manifest.chunkSize(), "received": manifest.Received, "expiresAt": manifest.ExpiresAt})
+}
+
+func (a *App) handleChunkPart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/upload/chunk/"), "/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 || parts[1] != "file" {
+		writeError(w, 404, "not_found", "not found", nil)
+		return
+	}
+	uploadID := filepath.Base(parts[0])
+	fileIndex, err1 := strconv.Atoi(parts[2])
+	chunkIndex, err2 := strconv.Atoi(r.URL.Query().Get("chunk"))
+	if err1 != nil || err2 != nil {
+		writeError(w, 400, "bad_request", "分片参数无效", nil)
+		return
+	}
+	manifest, err := a.loadChunkManifest(uploadID)
+	if err != nil {
+		writeError(w, 404, "upload_not_found", "上传会话不存在或已过期", nil)
+		return
+	}
+	if manifest.expired(time.Now()) {
+		_ = os.RemoveAll(a.chunkUploadDir(uploadID))
+		writeError(w, 410, "upload_expired", "上传会话已过期，请重新上传", nil)
+		return
+	}
+	if fileIndex < 0 || fileIndex >= len(manifest.Files) || chunkIndex < 0 || chunkIndex >= manifest.Files[fileIndex].Chunks {
+		writeError(w, 400, "bad_request", "分片序号无效", nil)
+		return
+	}
+	key := strconv.Itoa(fileIndex)
+	partPath := filepath.Join(a.chunkUploadDir(uploadID), fmt.Sprintf("file-%d-chunk-%d.part", fileIndex, chunkIndex))
+	chunkSize := manifest.chunkSize()
+	body := http.MaxBytesReader(w, r.Body, chunkSize+1024)
+	out, err := os.Create(partPath)
+	if err != nil {
+		writeError(w, 500, "temp_create_failed", "创建临时分片失败", nil)
+		return
+	}
+	buf := make([]byte, 1024*1024)
+	n, copyErr := io.CopyBuffer(out, body, buf)
+	closeErr := out.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(partPath)
+		writeError(w, 500, "temp_write_failed", "写入临时分片失败", nil)
+		return
+	}
+	if n > chunkSize {
+		_ = os.Remove(partPath)
+		writeError(w, 413, "upload_too_large", "分片超过当前允许的上传限制", nil)
+		return
+	}
+	a.chunkMu.Lock()
+	defer a.chunkMu.Unlock()
+	manifest, err = a.loadChunkManifest(uploadID)
+	if err != nil {
+		_ = os.Remove(partPath)
+		writeError(w, 404, "upload_not_found", "上传会话不存在或已过期", nil)
+		return
+	}
+	if manifest.expired(time.Now()) {
+		_ = os.Remove(partPath)
+		_ = os.RemoveAll(a.chunkUploadDir(uploadID))
+		writeError(w, 410, "upload_expired", "上传会话已过期，请重新上传", nil)
+		return
+	}
+	if fileIndex < 0 || fileIndex >= len(manifest.Files) || chunkIndex < 0 || chunkIndex >= manifest.Files[fileIndex].Chunks {
+		_ = os.Remove(partPath)
+		writeError(w, 400, "bad_request", "分片序号无效", nil)
+		return
+	}
+	if _, ok := manifest.Received[key]; !ok {
+		manifest.Received[key] = make([]bool, manifest.Files[fileIndex].Chunks)
+	}
+	manifest.Received[key][chunkIndex] = true
+	manifest.touch(time.Now())
+	if err := a.saveChunkManifest(manifest); err != nil {
+		writeError(w, 500, "temp_write_failed", "写入上传状态失败", nil)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "received": n})
+}
+
+func normalizeUploadChunkSize(size int64) int64 {
+	if size <= 0 {
+		return uploadChunkDefaultSize
+	}
+	if size < uploadChunkMinSize {
+		return uploadChunkMinSize
+	}
+	if size > uploadChunkMaxSize {
+		return uploadChunkMaxSize
+	}
+	rem := size % uploadChunkMinSize
+	if rem != 0 {
+		size -= rem
+	}
+	if size < uploadChunkMinSize {
+		return uploadChunkMinSize
+	}
+	return size
+}
+
+func (m chunkUploadManifest) chunkSize() int64 {
+	return normalizeUploadChunkSize(m.ChunkSize)
+}
+
+func (a *App) handleChunkComplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	policy := a.effectiveUploadPolicy()
+	var body struct {
+		UploadID string `json:"uploadId"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil || strings.TrimSpace(body.UploadID) == "" {
+		writeError(w, 400, "bad_request", "上传完成参数无效", nil)
+		return
+	}
+	manifest, err := a.loadChunkManifest(body.UploadID)
+	if err != nil {
+		writeError(w, 404, "upload_not_found", "上传会话不存在或已过期", nil)
+		return
+	}
+	if manifest.expired(time.Now()) {
+		_ = os.RemoveAll(a.chunkUploadDir(body.UploadID))
+		writeError(w, 410, "upload_expired", "上传会话已过期，请重新上传", nil)
+		return
+	}
+	a.finalizeSem <- struct{}{}
+	defer func() { <-a.finalizeSem }()
+
+	type item struct {
+		OK    bool   `json:"ok"`
+		File  any    `json:"file,omitempty"`
+		Error string `json:"error,omitempty"`
+		Code  string `json:"code,omitempty"`
+		Name  string `json:"name,omitempty"`
+	}
+	var items []item
+	success, failed := 0, 0
+	for i, f := range manifest.Files {
+		if !manifest.fileComplete(i) {
+			failed++
+			items = append(items, item{OK: false, Name: f.Name, Code: "upload_incomplete", Error: "文件分片尚未全部上传"})
+			continue
+		}
+		tmpPath, err := a.assembleChunkFile(manifest.ID, i, f)
+		if err != nil {
+			failed++
+			items = append(items, item{OK: false, Name: f.Name, Code: "temp_write_failed", Error: "合并分片失败"})
+			continue
+		}
+		file, code, err := a.processTempUpload(r.Context(), r, tmpPath, manifest.BatchID, manifest.Owner, f.Name, f.Size, policy)
+		_ = os.Remove(tmpPath)
+		if err != nil {
+			failed++
+			items = append(items, item{OK: false, Name: f.Name, Code: code, Error: err.Error()})
+			continue
+		}
+		success++
+		items = append(items, item{OK: true, File: file, Name: f.Name})
+	}
+	status := "completed"
+	if failed > 0 && success == 0 {
+		status = "failed"
+	} else if failed > 0 {
+		status = "partial"
+	}
+	_ = myfiles.UpdateBatchCounts(a.db, manifest.BatchID, len(manifest.Files), success, failed, status)
+	audit.Write(a.db, r, audit.Actor{AccountUserID: manifest.Owner, Role: manifest.Role}, "upload.create", "upload_batch", manifest.BatchID, map[string]any{"total": len(manifest.Files), "success": success, "failed": failed, "chunked": true})
+	_ = os.RemoveAll(a.chunkUploadDir(manifest.ID))
+	batch, _, _ := myfiles.GetBatch(a.db, manifest.BatchID)
+	writeJSON(w, 200, map[string]any{
+		"ok":              true,
+		"batchId":         manifest.BatchID,
+		"pickupCode":      batch.PickupCode,
+		"pickupExpiresAt": batch.PickupExpiresAt,
+		"status":          status,
+		"items":           items,
+		"resultPath":      "/uploads/" + url.PathEscape(manifest.BatchID),
+		"downloadPath":    "/uploads/" + url.PathEscape(manifest.BatchID),
+	})
+}
+
+func (a *App) handleChunkCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	var body struct {
+		UploadID string `json:"uploadId"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil || strings.TrimSpace(body.UploadID) == "" {
+		writeError(w, 400, "bad_request", "取消上传参数无效", nil)
+		return
+	}
+	_ = os.RemoveAll(a.chunkUploadDir(body.UploadID))
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (m *chunkUploadManifest) touch(now time.Time) {
+	m.UpdatedAt = now.UTC().Format(time.RFC3339)
+	m.ExpiresAt = now.Add(chunkUploadExpiry).UTC().Format(time.RFC3339)
+}
+
+func (m chunkUploadManifest) expired(now time.Time) bool {
+	expiresAt, err := time.Parse(time.RFC3339, m.ExpiresAt)
+	if err != nil {
+		updatedAt, err := time.Parse(time.RFC3339, m.UpdatedAt)
+		if err != nil {
+			updatedAt, _ = time.Parse(time.RFC3339, m.CreatedAt)
+		}
+		expiresAt = updatedAt.Add(chunkUploadExpiry)
+	}
+	return !expiresAt.IsZero() && now.After(expiresAt)
+}
+
+func (m chunkUploadManifest) matchesFiles(files []struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	Type string `json:"type"`
+}) bool {
+	if len(files) != len(m.Files) {
+		return false
+	}
+	for i, f := range files {
+		if filepath.Base(f.Name) != m.Files[i].Name || f.Size != m.Files[i].Size || f.Type != m.Files[i].Type {
+			return false
+		}
+	}
+	return true
+}
+
+func (m chunkUploadManifest) fileComplete(index int) bool {
+	received := m.Received[strconv.Itoa(index)]
+	if index < 0 || index >= len(m.Files) || len(received) != m.Files[index].Chunks {
+		return false
+	}
+	for _, ok := range received {
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) chunkUploadRoot() string {
+	return filepath.Join(a.cfg.App.TempDir, "chunks")
+}
+
+func (a *App) chunkUploadDir(uploadID string) string {
+	return filepath.Join(a.chunkUploadRoot(), filepath.Base(uploadID))
+}
+
+func (a *App) chunkManifestPath(uploadID string) string {
+	return filepath.Join(a.chunkUploadDir(uploadID), "manifest.json")
+}
+
+func (a *App) saveChunkManifest(manifest chunkUploadManifest) error {
+	if err := os.MkdirAll(a.chunkUploadDir(manifest.ID), 0750); err != nil {
+		return err
+	}
+	tmp := a.chunkManifestPath(manifest.ID) + ".tmp"
+	b, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(tmp, b, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.chunkManifestPath(manifest.ID))
+}
+
+func (a *App) loadChunkManifest(uploadID string) (chunkUploadManifest, error) {
+	var manifest chunkUploadManifest
+	b, err := os.ReadFile(a.chunkManifestPath(filepath.Base(uploadID)))
+	if err != nil {
+		return manifest, err
+	}
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		return manifest, err
+	}
+	return manifest, nil
+}
+
+func (a *App) assembleChunkFile(uploadID string, fileIndex int, f chunkUploadFile) (string, error) {
+	tmpPath := filepath.Join(a.chunkUploadDir(uploadID), fmt.Sprintf("file-%d-complete.upload", fileIndex))
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	var written int64
+	buf := make([]byte, 256*1024)
+	for i := 0; i < f.Chunks; i++ {
+		partPath := filepath.Join(a.chunkUploadDir(uploadID), fmt.Sprintf("file-%d-chunk-%d.part", fileIndex, i))
+		in, err := os.Open(partPath)
+		if err != nil {
+			_ = out.Close()
+			return "", err
+		}
+		n, copyErr := io.CopyBuffer(out, in, buf)
+		_ = in.Close()
+		if copyErr != nil {
+			_ = out.Close()
+			return "", copyErr
+		}
+		_ = os.Remove(partPath)
+		written += n
+	}
+	if err := out.Close(); err != nil {
+		return "", err
+	}
+	if written != f.Size {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("assembled size mismatch")
+	}
+	return tmpPath, nil
+}
+
+func (a *App) cleanupOldChunkUploads() error {
+	root := a.chunkUploadRoot()
+	if err := os.MkdirAll(root, 0750); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	fallbackCutoff := now.Add(-chunkUploadExpiry)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		manifest, err := a.loadChunkManifest(entry.Name())
+		if err == nil && manifest.expired(now) {
+			_ = os.RemoveAll(dir)
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && info.ModTime().Before(fallbackCutoff) {
+			_ = os.RemoveAll(dir)
+		}
+	}
+	return nil
 }
 
 func (a *App) processOneUpload(r *http.Request, batchID, owner string, fh *multipart.FileHeader, policy uploadPolicy) (myfiles.File, string, error) {
@@ -367,8 +862,7 @@ func (a *App) processOneUpload(r *http.Request, batchID, owner string, fh *multi
 	}
 	defer os.Remove(tmpPath)
 
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(src, policy.MaxBytes+1))
+	n, err := io.Copy(tmp, io.LimitReader(src, policy.MaxBytes+1))
 	if closeErr := tmp.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
@@ -379,7 +873,20 @@ func (a *App) processOneUpload(r *http.Request, batchID, owner string, fh *multi
 		return myfiles.File{}, "upload_too_large", fmt.Errorf("文件超过当前允许的上传限制")
 	}
 
-	mimeType, err := detectMIME(tmpPath)
+	return a.processTempUpload(r.Context(), r, tmpPath, batchID, owner, filepath.Base(fh.Filename), n, policy)
+}
+
+func (a *App) processTempUpload(ctx context.Context, r *http.Request, tmpPath, batchID, owner, originalName string, size int64, policy uploadPolicy) (myfiles.File, string, error) {
+	if size > policy.MaxBytes {
+		return myfiles.File{}, "upload_too_large", fmt.Errorf("文件超过当前允许的上传限制")
+	}
+
+	h, err := fileSHA256(tmpPath)
+	if err != nil {
+		return myfiles.File{}, "temp_write_failed", fmt.Errorf("写入临时文件失败")
+	}
+
+	mimeType, err := detectMIME(tmpPath, originalName)
 	if err != nil {
 		return myfiles.File{}, "mime_detect_failed", fmt.Errorf("文件类型检测失败")
 	}
@@ -394,22 +901,23 @@ func (a *App) processOneUpload(r *http.Request, batchID, owner string, fh *multi
 			height = &h
 		}
 	}
-	name := filepath.Base(fh.Filename)
-	shaHex := hex.EncodeToString(h.Sum(nil))
+	fileID := ids.New("fil")
+	name := filepath.Base(originalName)
+	shaHex := hex.EncodeToString(h)
 
-	up, err := a.currentStorage().Upload(r.Context(), storage.UploadInput{TempPath: tmpPath, FileID: fileID, Filename: name, MIME: mimeType, SHA256: shaHex, Size: n})
+	up, err := a.currentStorage().Upload(ctx, storage.UploadInput{TempPath: tmpPath, FileID: fileID, Filename: name, MIME: mimeType, SHA256: shaHex, Size: size})
 	if err != nil {
 		return myfiles.File{}, "storage_upload_failed", fmt.Errorf("存储通道上传失败：%v", err)
 	}
 
-	publicURL := a.publicBaseURL(r) + publicFilePath(fileID, fh.Filename)
+	publicURL := a.publicBaseURL(r) + publicFilePath(fileID, name)
 	if up.PublicURL != "" && !isLocalBaseURL(up.PublicURL) {
 		publicURL = up.PublicURL
 	}
 	f, err := myfiles.CreateFile(a.db, myfiles.CreateFileInput{
 		ID: fileID, BatchID: batchID, OwnerUserID: owner, OriginalName: name, StoredName: up.FileID,
-		MIME: mimeType, Size: n, SHA256: shaHex, ImageWidth: width, ImageHeight: height,
-		StorageProvider: up.Provider, StorageFileID: up.FileID, StorageURL: up.URL, PublicURL: publicURL,
+		MIME: mimeType, Size: size, SHA256: shaHex, ImageWidth: width, ImageHeight: height,
+		StorageProvider: up.Provider, StorageFileID: up.FileID, ThumbnailFileID: up.ThumbnailFileID, StorageURL: up.URL, PublicURL: publicURL,
 		IsPublic: policy.DefaultPublic, RequireConfirm: policy.DefaultRequireConfirm,
 		RegionPolicy: policy.DefaultRegionPolicy, HotlinkPolicy: policy.DefaultHotlinkPolicy,
 	})
@@ -421,7 +929,20 @@ func (a *App) processOneUpload(r *http.Request, batchID, owner string, fh *multi
 	return f, "", nil
 }
 
-func detectMIME(path string) (string, error) {
+func fileSHA256(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
+}
+
+func detectMIME(path, name string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -430,9 +951,32 @@ func detectMIME(path string) (string, error) {
 	buf := make([]byte, 512)
 	n, _ := io.ReadFull(f, buf)
 	if n == 0 {
+		if extMIME := mimeFromName(name); extMIME != "" {
+			return extMIME, nil
+		}
 		return "application/octet-stream", nil
 	}
-	return http.DetectContentType(buf[:n]), nil
+	detected := http.DetectContentType(buf[:n])
+	extMIME := mimeFromName(name)
+	if shouldPreferExtensionMIME(detected, extMIME) {
+		return extMIME, nil
+	}
+	return detected, nil
+}
+
+func shouldPreferExtensionMIME(detected, extMIME string) bool {
+	if extMIME == "" {
+		return false
+	}
+	detected = strings.ToLower(strings.TrimSpace(detected))
+	extMIME = strings.ToLower(strings.TrimSpace(extMIME))
+	if detected == "application/octet-stream" {
+		return true
+	}
+	if detected == "text/plain; charset=utf-8" && (isSubtitleMIME(extMIME) || strings.HasPrefix(extMIME, "audio/")) {
+		return true
+	}
+	return (strings.HasPrefix(extMIME, "video/") || strings.HasPrefix(extMIME, "audio/")) && !strings.HasPrefix(detected, strings.Split(extMIME, "/")[0]+"/")
 }
 
 func imageSize(path string) (int, int, bool) {
@@ -539,7 +1083,7 @@ func (a *App) handleFilesBatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "share.batch.create", "file", "", map[string]any{"pickupCode": share.PickupCode, "count": len(authorized), "fileIds": authorized})
-		writeJSON(w, 200, map[string]any{"ok": true, "share": share, "url": "/download?code=" + url.QueryEscape(share.PickupCode)})
+		writeJSON(w, 200, map[string]any{"ok": true, "share": share, "url": "/?code=" + url.QueryEscape(share.PickupCode)})
 	default:
 		writeError(w, 400, "bad_action", "不支持的批量操作", nil)
 	}
@@ -582,7 +1126,7 @@ func (a *App) handleFileAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "share.create", "file", id, map[string]any{"pickupCode": share.PickupCode})
-			writeJSON(w, 200, map[string]any{"ok": true, "share": share, "url": "/download?code=" + url.QueryEscape(share.PickupCode)})
+			writeJSON(w, 200, map[string]any{"ok": true, "share": share, "url": "/?code=" + url.QueryEscape(share.PickupCode)})
 			return
 		}
 		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
@@ -609,7 +1153,7 @@ func (a *App) filePayload(f myfiles.File) map[string]any {
 		"ownerUserId":     f.OwnerUserID,
 		"originalName":    f.OriginalName,
 		"storedName":      f.StoredName,
-		"mime":            f.MIME,
+		"mime":            effectiveFileMIME(f),
 		"size":            f.Size,
 		"sha256":          f.SHA256,
 		"imageWidth":      f.ImageWidth,
@@ -617,7 +1161,7 @@ func (a *App) filePayload(f myfiles.File) map[string]any {
 		"storageProvider": f.StorageProvider,
 		"storageFileId":   f.StorageFileID,
 		"storageUrl":      f.StorageURL,
-		"publicUrl":       f.PublicURL,
+		"publicUrl":       canonicalPublicURL(f),
 		"isPublic":        f.IsPublic,
 		"requireConfirm":  f.RequireConfirm,
 		"regionPolicy":    f.RegionPolicy,
@@ -710,7 +1254,7 @@ func (a *App) handlePickup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePickupFile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
 		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
 		return
 	}
@@ -720,7 +1264,19 @@ func (a *App) handlePickupFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code := parts[0]
-	id := publicFileID(parts[1])
+	raw := false
+	filePart := parts[1]
+	actionIndex := 2
+	if parts[1] == "raw" {
+		if len(parts) < 3 {
+			http.NotFound(w, r)
+			return
+		}
+		raw = true
+		filePart = parts[2]
+		actionIndex = 3
+	}
+	id := publicFileID(filePart)
 	b, list, err := myfiles.GetBatchByPickupCode(a.db, code)
 	targetType := "upload_batch"
 	targetID := b.ID
@@ -748,11 +1304,48 @@ func (a *App) handlePickupFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	audit.Write(a.db, r, audit.Actor{}, "pickup.download", "file", f.ID, map[string]any{targetType: targetID})
-	if a.needsDownloadConfirm(r, f) {
-		http.Redirect(w, r, downloadPagePath(r.URL.String()), http.StatusFound)
+	fileURL := pickupFilePath(code, f.ID, f.OriginalName)
+	rawFileURL := pickupRawFilePath(code, f.ID, f.OriginalName)
+	downloadURL := fileURL + "/download"
+	if raw {
+		a.serveStoredFile(w, r, f, false)
 		return
 	}
-	a.serveStoredFile(w, r, f, false)
+	if len(parts) > actionIndex && parts[actionIndex] == "download-confirm" {
+		if isPreviewableMedia(f.MIME, f.OriginalName) {
+			http.Redirect(w, r, fileURL, http.StatusSeeOther)
+			return
+		}
+		a.confirmDownload(w, r, downloadConfirmCookieName("pickup", code, f.ID), "/pickup")
+		http.Redirect(w, r, downloadURL, http.StatusSeeOther)
+		return
+	}
+	if r.Method == http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	if len(parts) > actionIndex && parts[actionIndex] == "download" {
+		if isPreviewableMedia(f.MIME, f.OriginalName) {
+			http.Redirect(w, r, fileURL, http.StatusSeeOther)
+			return
+		}
+		if !a.hasDownloadConfirmation(r, downloadConfirmCookieName("pickup", code, f.ID)) {
+			http.Redirect(w, r, fileURL, http.StatusSeeOther)
+			return
+		}
+		a.clearDownloadConfirmation(w, r, downloadConfirmCookieName("pickup", code, f.ID), "/pickup")
+		a.serveStoredFile(w, r, f, false)
+		return
+	}
+	if shouldServeFileBytes(r, f) {
+		redirectNoStore(w, r, rawFileURL)
+		return
+	}
+	a.previewHTML(w, r, f, false, previewLinks{
+		MediaURL:    rawFileURL,
+		PreviewURL:  requestOrigin(r) + fileURL,
+		DownloadURL: fileURL + "/download-confirm",
+	})
 }
 
 func shareBatch(share myfiles.PickupShare, total int) myfiles.Batch {
@@ -771,13 +1364,9 @@ func shareBatch(share myfiles.PickupShare, total int) myfiles.Batch {
 
 func (a *App) serveStoredFile(w http.ResponseWriter, r *http.Request, f myfiles.File, publicCache bool) {
 	if f.StorageProvider == "local" && f.StorageURL != "" {
-		w.Header().Set("Content-Type", f.MIME)
+		w.Header().Set("Content-Type", effectiveFileMIME(f))
 		w.Header().Set("Content-Disposition", contentDisposition(r, f))
-		if publicCache {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			w.Header().Set("Cache-Control", "private, max-age=0, no-store")
-		}
+		setStoredFileCacheHeaders(w, f, publicCache)
 		http.ServeFile(w, r, f.StorageURL)
 		return
 	}
@@ -793,140 +1382,33 @@ func (a *App) serveStoredFile(w http.ResponseWriter, r *http.Request, f myfiles.
 	http.NotFound(w, r)
 }
 
-func (a *App) needsDownloadConfirm(r *http.Request, f myfiles.File) bool {
-	if r.Method == http.MethodHead || r.URL.Query().Get("download") == "1" || r.URL.Query().Get("inline") == "1" || strings.HasPrefix(f.MIME, "image/") {
-		return false
-	}
-	if f.StorageProvider != "local" && f.StorageProvider != "tgbots" && f.StorageURL != "" {
-		return false
-	}
-	return true
-}
-
-func downloadPagePath(next string) string {
-	return "/download?next=" + url.QueryEscape(next)
-}
-
 func contentDisposition(r *http.Request, f myfiles.File) string {
 	mode := "inline"
-	if r.URL.Query().Get("download") == "1" && !strings.HasPrefix(f.MIME, "image/") {
+	if strings.HasSuffix(strings.Trim(r.URL.Path, "/"), "/download") {
 		mode = "attachment"
 	}
 	return mode + "; filename=" + strconv.Quote(f.OriginalName)
 }
 
-func (a *App) downloadConfirmHTML(w http.ResponseWriter, r *http.Request, f myfiles.File) {
-	next := r.URL.Query().Get("next")
-	if next == "" || strings.HasPrefix(next, "/download") || strings.HasPrefix(next, "http://") || strings.HasPrefix(next, "https://") {
-		http.NotFound(w, r)
+func setStoredFileCacheHeaders(w http.ResponseWriter, f myfiles.File, publicCache bool) {
+	if publicCache {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, s-maxage=31536000, immutable")
+		if etag := fileEntityTag(f); etag != "" {
+			w.Header().Set("ETag", etag)
+		}
 		return
 	}
-	u, err := url.Parse(next)
-	if err != nil || !strings.HasPrefix(u.Path, "/") {
-		http.NotFound(w, r)
-		return
-	}
-	q := u.Query()
-	q.Set("download", "1")
-	u.RawQuery = q.Encode()
-	zh := strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "zh")
-	lang := "en"
-	title := "Confirm download"
-	message := "This file is not an image. Please confirm before downloading."
-	confirm := "Download"
-	back := "Back home"
-	if zh {
-		lang = "zh-CN"
-		title = "确认下载"
-		message = "这个文件不是图片。为避免浏览器直接打开或误触下载，请确认后继续。"
-		confirm = "确认下载"
-		back = "返回首页"
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, max-age=0, no-store")
-	fmt.Fprintf(w, `<!doctype html>
-<html lang="%s">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow">
-<title>%s</title>
-<style>
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f6fbff;color:#182033;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-main{width:min(560px,calc(100%% - 32px));border:4px solid #182033;border-radius:8px;background:#fff;box-shadow:8px 8px 0 #182033;padding:24px;display:grid;gap:16px}
-a{border:3px solid #182033;border-radius:6px;background:#ffd44d;color:#15120a;font-weight:900;padding:12px 16px;text-decoration:none;display:inline-flex;justify-content:center}
-.meta{color:#5d6b82;overflow-wrap:anywhere}.actions{display:flex;gap:12px;flex-wrap:wrap}.secondary{background:#fff}
-</style>
-</head>
-<body>
-<main aria-labelledby="title">
-<h1 id="title">%s</h1>
-<p>%s</p>
-<div class="meta"><strong>%s</strong><br>%s · %s</div>
-<div class="actions"><a href="%s" download>%s</a><a class="secondary" href="/">%s</a></div>
-</main>
-</body>
-</html>`, lang, html.EscapeString(title), html.EscapeString(title), html.EscapeString(message), html.EscapeString(f.OriginalName), html.EscapeString(f.MIME), html.EscapeString(formatBytes(f.Size)), html.EscapeString(u.String()), html.EscapeString(confirm), html.EscapeString(back))
 }
 
-func (a *App) downloadResultHTML(w http.ResponseWriter, r *http.Request, b myfiles.Batch, files []myfiles.File, code string) {
-	zh := strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "zh")
-	lang := "en"
-	title := "Pickup code ready"
-	codeLabel := "Pickup code"
-	copyText := "Copy link"
-	openText := "Open"
-	back := "Back home"
-	valid := "Valid until"
-	if zh {
-		lang = "zh-CN"
-		title = "取件码已生成"
-		codeLabel = "取件码"
-		copyText = "复制链接"
-		openText = "打开"
-		back = "返回首页"
-		valid = "有效期至"
+func fileEntityTag(f myfiles.File) string {
+	if f.SHA256 != "" {
+		return strconv.Quote(f.SHA256)
 	}
-	link := requestOrigin(r) + "/download?code=" + url.QueryEscape(code)
-	var rows strings.Builder
-	for _, f := range files {
-		fileURL := publicFilePath(f.ID, f.OriginalName)
-		if code != "" {
-			fileURL = "/pickup/" + url.PathEscape(code) + "/" + url.PathEscape(f.ID) + strings.ToLower(filepath.Ext(f.OriginalName))
-		}
-		rows.WriteString(fmt.Sprintf(`<article class="file-row"><span class="file-badge">%s</span><div><strong>%s</strong><small>%s · %s</small></div><a href="%s" target="_blank">%s</a></article>`,
-			html.EscapeString(fileIcon(f.MIME, f.OriginalName)), html.EscapeString(f.OriginalName), html.EscapeString(f.MIME), html.EscapeString(formatBytes(f.Size)), html.EscapeString(fileURL), html.EscapeString(openText)))
+	if f.ID != "" && f.Size >= 0 {
+		return strconv.Quote(fmt.Sprintf("%s-%d", f.ID, f.Size))
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "private, max-age=0, no-store")
-	fmt.Fprintf(w, `<!doctype html>
-<html lang="%s">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow">
-<title>%s</title>
-<style>
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f6fbff;color:#182033;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-main{width:min(760px,calc(100%% - 32px));border:4px solid #182033;border-radius:8px;background:#fff;box-shadow:8px 8px 0 #182033;padding:24px;display:grid;gap:16px}
-.code{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;border:3px solid #182033;border-radius:8px;background:#f6fbff;padding:14px}.code strong{font-size:34px;letter-spacing:.08em}.code span,.meta,small{color:#5d6b82}.actions{display:flex;gap:12px;flex-wrap:wrap}button,a{border:3px solid #182033;border-radius:6px;background:#ffd44d;color:#15120a;font-weight:900;padding:12px 16px;text-decoration:none;display:inline-flex;justify-content:center;cursor:pointer}.secondary{background:#fff}.file-list{display:grid;gap:10px}.file-row{display:grid;grid-template-columns:56px minmax(0,1fr) auto;gap:12px;align-items:center;border:2px solid rgba(24,32,51,.22);border-radius:8px;padding:10px}.file-badge{width:52px;height:52px;display:grid;place-items:center;border:2px solid #182033;border-radius:8px;background:#dff0ff;font-size:24px;font-weight:900}.file-row div{min-width:0}.file-row strong,.file-row small{display:block;overflow-wrap:anywhere}@media(max-width:640px){.file-row{grid-template-columns:52px 1fr}.file-row a{grid-column:1/-1}}
-</style>
-</head>
-<body>
-<main aria-labelledby="title">
-<h1 id="title">%s</h1>
-<section class="code"><div><span>%s</span><strong>%s</strong><div class="meta">%s %s</div></div><button type="button" id="copy">%s</button></section>
-<div class="actions"><a class="secondary" href="/">%s</a></div>
-<section class="file-list">%s</section>
-</main>
-<script>
-document.querySelector("#copy").addEventListener("click", async () => {
-  await navigator.clipboard?.writeText(%q);
-  document.querySelector("#copy").textContent = %q;
-});
-</script>
-</body>
-</html>`, lang, html.EscapeString(title), html.EscapeString(title), html.EscapeString(codeLabel), html.EscapeString(code), html.EscapeString(valid), html.EscapeString(formatTimeLabel(b.PickupExpiresAt)), html.EscapeString(copyText), html.EscapeString(back), rows.String(), link, copyText)
+	return ""
 }
 
 func fileIcon(mime, name string) string {
@@ -1114,7 +1596,7 @@ func (a *App) handleAdminOpenFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.StorageProvider == "local" && f.StorageURL != "" {
-		w.Header().Set("Content-Type", f.MIME)
+		w.Header().Set("Content-Type", effectiveFileMIME(f))
 		w.Header().Set("Content-Disposition", "inline; filename="+strconv.Quote(f.OriginalName))
 		w.Header().Set("Cache-Control", "private, max-age=0, no-store")
 		http.ServeFile(w, r, f.StorageURL)
@@ -1130,66 +1612,6 @@ func (a *App) handleAdminOpenFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
-}
-
-func (a *App) handleDownloadPage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
-		return
-	}
-	if uploadID := strings.TrimSpace(r.URL.Query().Get("upload")); uploadID != "" {
-		b, list, err := myfiles.GetBatch(a.db, uploadID)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		if !a.canViewBatch(w, r, b) {
-			return
-		}
-		a.downloadResultHTML(w, r, b, list, b.PickupCode)
-		return
-	}
-	if code := strings.TrimSpace(r.URL.Query().Get("code")); code != "" {
-		b, list, err := myfiles.GetBatchByPickupCode(a.db, code)
-		if err != nil {
-			share, shareFiles, shareErr := myfiles.GetShareByPickupCode(a.db, code)
-			if shareErr != nil {
-				http.NotFound(w, r)
-				return
-			}
-			a.downloadResultHTML(w, r, shareBatch(share, len(shareFiles)), shareFiles, share.PickupCode)
-			return
-		}
-		a.downloadResultHTML(w, r, b, list, b.PickupCode)
-		return
-	}
-	next := r.URL.Query().Get("next")
-	u, err := url.Parse(next)
-	if err != nil || !strings.HasPrefix(u.Path, "/") {
-		http.NotFound(w, r)
-		return
-	}
-	var id string
-	switch {
-	case strings.HasPrefix(u.Path, "/file/"):
-		id = publicFileID(strings.TrimPrefix(u.Path, "/file/"))
-	case strings.HasPrefix(u.Path, "/f/"):
-		id = publicFileID(strings.TrimPrefix(u.Path, "/f/"))
-	case strings.HasPrefix(u.Path, "/pickup/"):
-		parts := strings.Split(strings.Trim(strings.TrimPrefix(u.Path, "/pickup/"), "/"), "/")
-		if len(parts) >= 2 {
-			id = publicFileID(parts[1])
-		}
-	default:
-		http.NotFound(w, r)
-		return
-	}
-	f, err := myfiles.GetFile(a.db, id, false)
-	if err != nil || strings.HasPrefix(f.MIME, "image/") {
-		http.NotFound(w, r)
-		return
-	}
-	a.downloadConfirmHTML(w, r, f)
 }
 
 func (a *App) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
@@ -1285,9 +1707,13 @@ func (a *App) handleAdminStorageTest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePublicFile(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/file/")
-	if strings.HasPrefix(r.URL.Path, "/f/") {
-		rest = strings.TrimPrefix(r.URL.Path, "/f/")
+	rest := strings.TrimPrefix(r.URL.Path, "/files/")
+	raw := strings.HasPrefix(rest, "raw/")
+	if raw {
+		rest = strings.TrimPrefix(rest, "raw/")
+	} else if strings.HasSuffix(rest, "/raw") {
+		raw = true
+		rest = strings.TrimSuffix(rest, "/raw")
 	}
 	if strings.HasSuffix(rest, "/info") {
 		id := publicFileID(strings.TrimSuffix(rest, "/info"))
@@ -1297,6 +1723,16 @@ func (a *App) handlePublicFile(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(rest, "/confirm") {
 		id := publicFileID(strings.TrimSuffix(rest, "/confirm"))
 		a.handlePublicFileConfirm(w, r, id)
+		return
+	}
+	if strings.HasSuffix(rest, "/download-confirm") {
+		id := publicFileID(strings.TrimSuffix(rest, "/download-confirm"))
+		a.handlePublicFileDownloadConfirm(w, r, id)
+		return
+	}
+	if strings.HasSuffix(rest, "/download") {
+		id := publicFileID(strings.TrimSuffix(rest, "/download"))
+		a.handlePublicFileDownload(w, r, id)
 		return
 	}
 	id := publicFileID(rest)
@@ -1315,83 +1751,197 @@ func (a *App) handlePublicFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if a.needsDownloadConfirm(r, f) {
-		http.Redirect(w, r, downloadPagePath(r.URL.String()), http.StatusFound)
+	if raw {
+		a.serveStoredFile(w, r, f, true)
 		return
 	}
-	a.serveStoredFile(w, r, f, true)
+	if shouldServeFileBytes(r, f) {
+		redirectNoStore(w, r, publicRawFilePath(f.ID, f.OriginalName))
+		return
+	}
+	a.publicPreviewHTML(w, r, f, false)
 }
 
-func (a *App) handlePublicPreview(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
-		return
+func isSocialPreviewRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
 	}
-	prefix := "/view/"
-	embed := false
-	switch {
-	case strings.HasPrefix(r.URL.Path, "/preview/"):
-		prefix = "/preview/"
-	case strings.HasPrefix(r.URL.Path, "/embed/"):
-		prefix = "/embed/"
-		embed = true
+	ua := strings.ToLower(r.UserAgent())
+	if ua == "" {
+		return false
 	}
-	id := publicFileID(strings.TrimPrefix(r.URL.Path, prefix))
-	f, err := myfiles.GetFile(a.db, id, false)
-	if err != nil || !f.IsPublic || f.Status != "active" || !isPreviewableMedia(f.MIME) {
-		http.NotFound(w, r)
-		return
-	}
-	if f.RequireConfirm {
-		if c, err := r.Cookie("myfiles_file_confirm_" + id); err != nil || c.Value != "1" {
-			writeError(w, 451, "confirmation_required", "访问该文件前需要确认", map[string]any{"confirmPath": publicFilePath(id, f.OriginalName) + "/confirm"})
-			return
+	for _, marker := range []string{
+		"facebookexternalhit",
+		"facebot",
+		"twitterbot",
+		"telegrambot",
+		"discordbot",
+		"slackbot",
+		"linkedinbot",
+		"whatsapp",
+		"skypeuripreview",
+		"pinterest",
+	} {
+		if strings.Contains(ua, marker) {
+			return true
 		}
 	}
-	a.publicPreviewHTML(w, r, f, embed)
+	return false
 }
 
-func isPreviewableMedia(mime string) bool {
-	return strings.HasPrefix(mime, "image/") || strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "audio/")
+func shouldServeFileBytes(r *http.Request, f myfiles.File) bool {
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	if r.Method == http.MethodHead && !strings.Contains(accept, "text/html") {
+		return true
+	}
+	if r.Header.Get("Range") != "" {
+		return true
+	}
+	if !isPreviewableMedia(f.MIME, f.OriginalName) {
+		return false
+	}
+	if accept == "" {
+		return false
+	}
+	if strings.Contains(accept, "text/html") {
+		return false
+	}
+	return strings.Contains(accept, "*/*") || strings.Contains(accept, "image/") || strings.Contains(accept, "video/") || strings.Contains(accept, "audio/")
 }
 
-func mediaKind(mime string) string {
+func isPreviewableMedia(mimeType, name string) bool {
+	kind := mediaKind(mimeType, name)
+	return kind == "image" || kind == "video" || kind == "audio"
+}
+
+func mediaKind(mimeType, name string) string {
+	mimeType = effectiveMIME(mimeType, name)
 	switch {
-	case strings.HasPrefix(mime, "image/"):
+	case strings.HasPrefix(mimeType, "image/"):
 		return "image"
-	case strings.HasPrefix(mime, "video/"):
+	case strings.HasPrefix(mimeType, "video/"):
 		return "video"
-	case strings.HasPrefix(mime, "audio/"):
+	case strings.HasPrefix(mimeType, "audio/"):
 		return "audio"
 	default:
 		return "file"
 	}
 }
 
-func publicPreviewPath(id, name string) string {
-	return "/view/" + strings.TrimPrefix(publicFilePath(id, name), "/f/")
+func effectiveFileMIME(f myfiles.File) string {
+	return effectiveMIME(f.MIME, f.OriginalName)
 }
 
-func publicEmbedPath(id, name string) string {
-	return "/embed/" + strings.TrimPrefix(publicFilePath(id, name), "/f/")
+func effectiveMIME(mimeType, name string) string {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	extMIME := mimeFromName(name)
+	if shouldPreferExtensionMIME(mimeType, extMIME) {
+		return extMIME
+	}
+	if mimeType == "" {
+		if extMIME != "" {
+			return extMIME
+		}
+		return "application/octet-stream"
+	}
+	return mimeType
 }
 
-func inlineMediaPath(id, name string) string {
-	return publicFilePath(id, name) + "?inline=1"
+func mimeFromName(name string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
+	switch ext {
+	case ".mp4", ".m4v":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".webm":
+		return "video/webm"
+	case ".ogv":
+		return "video/ogg"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".m4a":
+		return "audio/mp4"
+	case ".aac":
+		return "audio/aac"
+	case ".flac":
+		return "audio/flac"
+	case ".wav":
+		return "audio/wav"
+	case ".oga", ".ogg", ".opus":
+		return "audio/ogg"
+	case ".vtt":
+		return "text/vtt; charset=utf-8"
+	case ".srt":
+		return "application/x-subrip"
+	case ".lrc":
+		return "text/plain; charset=utf-8"
+	}
+	if ext == "" {
+		return ""
+	}
+	if v := mime.TypeByExtension(ext); v != "" {
+		return v
+	}
+	return ""
+}
+
+func isSubtitleMIME(mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	return strings.HasPrefix(mimeType, "text/vtt") || mimeType == "application/x-subrip"
+}
+
+func pickupFilePath(code, id, name string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
+	if ext == "" || len(ext) > 12 || strings.ContainsAny(ext, `/\`) {
+		return "/pickup/" + url.PathEscape(code) + "/" + url.PathEscape(id)
+	}
+	return "/pickup/" + url.PathEscape(code) + "/" + url.PathEscape(id) + ext
+}
+
+func pickupRawFilePath(code, id, name string) string {
+	extPath := strings.TrimPrefix(pickupFilePath(code, id, name), "/pickup/"+url.PathEscape(code)+"/")
+	return "/pickup/" + url.PathEscape(code) + "/raw/" + extPath
 }
 
 func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File, embed bool) {
-	kind := mediaKind(f.MIME)
+	fileURL := publicFilePath(f.ID, f.OriginalName)
+	rawFileURL := publicRawFilePath(f.ID, f.OriginalName)
+	a.previewHTML(w, r, f, embed, previewLinks{
+		MediaURL:    rawFileURL,
+		PreviewURL:  requestOrigin(r) + fileURL,
+		EmbedURL:    requestOrigin(r) + fileURL,
+		DownloadURL: fileURL + "/download-confirm",
+	})
+}
+
+type previewLinks struct {
+	MediaURL    string
+	PreviewURL  string
+	EmbedURL    string
+	DownloadURL string
+}
+
+func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File, embed bool, links previewLinks) {
+	kind := mediaKind(f.MIME, f.OriginalName)
+	contentType := effectiveFileMIME(f)
+	if !isPreviewableMedia(f.MIME, f.OriginalName) {
+		kind = "file"
+	}
 	origin := requestOrigin(r)
-	mediaURL := inlineMediaPath(f.ID, f.OriginalName)
+	mediaURL := links.MediaURL
 	absMediaURL := origin + mediaURL
-	previewURL := origin + publicPreviewPath(f.ID, f.OriginalName)
-	embedURL := origin + publicEmbedPath(f.ID, f.OriginalName)
+	previewURL := links.PreviewURL
+	embedURL := links.EmbedURL
 	title := f.OriginalName
 	if title == "" {
 		title = f.ID
 	}
-	description := fmt.Sprintf("%s · %s · %s", f.MIME, formatBytes(f.Size), "myfiles media preview")
+	description := fmt.Sprintf("%s · %s", contentType, formatBytes(f.Size))
+	ogDescription := description
+	if kind != "file" {
+		ogDescription = title
+	}
 	robots := "index,follow"
 	if f.RequireConfirm {
 		robots = "noindex,nofollow"
@@ -1410,15 +1960,28 @@ func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfile
 	var media strings.Builder
 	switch kind {
 	case "image":
-		fmt.Fprintf(&media, `<img src="%s" alt="%s" loading="eager">`, html.EscapeString(mediaURL), html.EscapeString(title))
+		width, height := imagePreviewSize(f)
+		fmt.Fprintf(&media, `<div class="pswp-gallery"><a href="%s" data-pswp-width="%d" data-pswp-height="%d"><img src="%s" alt="%s" loading="eager"></a></div>`, html.EscapeString(mediaURL), width, height, html.EscapeString(mediaURL), html.EscapeString(title))
 	case "video":
 		poster := strings.TrimSpace(r.URL.Query().Get("poster"))
 		if poster == "" {
 			poster = publicOGImagePath(f.ID, f.OriginalName)
 		}
-		fmt.Fprintf(&media, `<video controls playsinline preload="none" poster="%s"><source src="%s" type="%s"></video>`, html.EscapeString(poster), html.EscapeString(mediaURL), html.EscapeString(f.MIME))
+		posterAttr := ""
+		if poster != "" {
+			posterAttr = fmt.Sprintf(` poster="%s"`, html.EscapeString(poster))
+		}
+		fmt.Fprintf(&media, `<div class="video-shell"><video data-caption-media controls playsinline preload="metadata"%s><source src="%s" type="%s"></video><div class="caption-overlay" data-caption-live aria-live="polite"></div></div>%s`, posterAttr, html.EscapeString(mediaURL), html.EscapeString(contentType), captionControls())
 	case "audio":
-		fmt.Fprintf(&media, `<div class="audio-card"><strong>%s</strong><audio controls preload="metadata"><source src="%s" type="%s"></audio></div>`, html.EscapeString(title), html.EscapeString(mediaURL), html.EscapeString(f.MIME))
+		fmt.Fprintf(&media, `<div class="audio-card"><div class="audio-art">%s</div><strong>%s</strong><audio data-caption-media controls preload="metadata"><source src="%s" type="%s"></audio><div class="caption-panel" data-caption-live aria-live="polite"></div>%s</div>`, html.EscapeString(fileIcon(f.MIME, f.OriginalName)), html.EscapeString(title), html.EscapeString(mediaURL), html.EscapeString(contentType), captionControls())
+	default:
+		downloadText := "Download after safety check"
+		message := "This file cannot be previewed online. Confirm the source is trustworthy and the file is safe before downloading."
+		if strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "zh") {
+			downloadText = "确认安全后下载"
+			message = "该文件无法在线预览。请确认文件来源可信、安全后再下载查看。"
+		}
+		fmt.Fprintf(&media, `<section class="file-card"><span class="file-icon">%s</span><h2>%s</h2><p>%s</p><dl><div><dt>MIME</dt><dd>%s</dd></div><div><dt>Size</dt><dd>%s</dd></div></dl><form method="post" action="%s"><button class="download-primary" type="submit">%s</button></form></section>`, html.EscapeString(fileIcon(f.MIME, f.OriginalName)), html.EscapeString(title), html.EscapeString(message), html.EscapeString(contentType), html.EscapeString(formatBytes(f.Size)), html.EscapeString(links.DownloadURL), html.EscapeString(downloadText))
 	}
 
 	var extraMeta strings.Builder
@@ -1427,7 +1990,7 @@ func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfile
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(absMediaURL))
 	}
-	if kind == "video" {
+	if kind == "video" && embedURL != "" {
 		ogImage := origin + publicOGImagePath(f.ID, f.OriginalName)
 		if poster := strings.TrimSpace(r.URL.Query().Get("poster")); poster != "" {
 			if strings.HasPrefix(poster, "https://") || strings.HasPrefix(poster, "http://") {
@@ -1444,7 +2007,7 @@ func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfile
 <meta name="twitter:player" content="%s">
 <meta name="twitter:player:width" content="1280">
 <meta name="twitter:player:height" content="720">
-<meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(absMediaURL), html.EscapeString(f.MIME), html.EscapeString(ogImage), html.EscapeString(embedURL), html.EscapeString(ogImage))
+<meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(absMediaURL), html.EscapeString(contentType), html.EscapeString(ogImage), html.EscapeString(embedURL), html.EscapeString(ogImage))
 	}
 	if kind == "audio" {
 		ogImage := origin + publicOGImagePath(f.ID, f.OriginalName)
@@ -1452,25 +2015,26 @@ func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfile
 <meta property="og:audio:type" content="%s">
 <meta property="og:image" content="%s">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(f.MIME), html.EscapeString(ogImage), html.EscapeString(ogImage))
+<meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(contentType), html.EscapeString(ogImage), html.EscapeString(ogImage))
 	}
 
 	bodyClass := "preview"
 	if embed {
 		bodyClass = "embed"
 	}
-	downloadURL := publicFilePath(f.ID, f.OriginalName) + "?download=1"
 	chrome := ""
 	if !embed {
-		chrome = fmt.Sprintf(`<header><div><span>myfiles</span><h1>%s</h1><p>%s</p></div><nav><a href="%s">Download</a><a href="%s">Embed</a></nav></header>`, html.EscapeString(title), html.EscapeString(description), html.EscapeString(downloadURL), html.EscapeString(publicEmbedPath(f.ID, f.OriginalName)))
+		chrome = fmt.Sprintf(`<header><div><h1>%s</h1></div></header>`, html.EscapeString(title))
 	}
+	stylesheets := ""
+	if kind == "image" {
+		stylesheets += `<link rel="stylesheet" href="/vendor/photoswipe/photoswipe.css">`
+	}
+	scripts := previewEnhancementScript(kind, previewSubtitleURL(r))
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if embed {
-		w.Header().Set("Cache-Control", "public, max-age=300, stale-while-revalidate=86400")
-	} else {
-		w.Header().Set("Cache-Control", "public, max-age=300, stale-while-revalidate=86400")
-	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Vary", "Accept, Range, User-Agent")
 	fmt.Fprintf(w, `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1484,21 +2048,163 @@ func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfile
 <meta property="og:title" content="%s">
 <meta property="og:description" content="%s">
 <meta property="og:url" content="%s">
-<meta property="og:site_name" content="myfiles">
+<meta name="twitter:title" content="%s">
+<meta name="twitter:description" content="%s">
+%s
 %s
 <style>
-*{box-sizing:border-box}html,body{margin:0;min-height:100%%;background:#0f1115;color:#f7f3e8;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body.preview{min-height:100vh;display:grid;grid-template-rows:auto 1fr;background:#11151b}header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 24px;border-bottom:1px solid rgba(255,255,255,.12);background:#171c23}header div{min-width:0}span{display:block;color:#9eb5c7;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}h1{margin:4px 0 6px;font-size:clamp(20px,3vw,34px);line-height:1.15;overflow-wrap:anywhere}p{margin:0;color:#bec8d2;font-size:14px}nav{display:flex;gap:10px;flex-wrap:wrap}a{border:1px solid rgba(255,255,255,.28);border-radius:6px;color:#f7f3e8;text-decoration:none;padding:9px 12px;font-weight:800}.stage{width:100%%;min-height:0;display:grid;place-items:center;padding:20px}.embed .stage{height:100vh;padding:0}img,video{display:block;max-width:100%%;max-height:calc(100vh - 132px);background:#06080b}video{width:min(100%%,1280px);aspect-ratio:16/9}.embed video,.embed img{width:100%%;height:100vh;max-height:none;object-fit:contain}.audio-card{width:min(720px,calc(100%% - 32px));display:grid;gap:16px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#171c23;padding:20px}.audio-card strong{overflow-wrap:anywhere}.audio-card audio{width:100%%}@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.stage{padding:12px}img,video{max-height:calc(100vh - 188px)}}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%%;background:#0f1115;color:#f7f3e8;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body.preview{min-height:100vh;display:grid;grid-template-rows:auto 1fr;background:#11151b}header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 24px;border-bottom:1px solid rgba(255,255,255,.12);background:#171c23}header div{min-width:0}span{display:block;color:#9eb5c7;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}h1{margin:0 0 4px;font-size:clamp(20px,3vw,34px);line-height:1.15;overflow-wrap:anywhere}h2{margin:0;font-size:22px;line-height:1.2;overflow-wrap:anywhere}p{margin:0;color:#bec8d2;font-size:14px}form{margin:0}a,button{border:1px solid rgba(255,255,255,.28);border-radius:6px;color:#f7f3e8;background:transparent;text-decoration:none;padding:9px 12px;font:inherit;font-weight:800;cursor:pointer}.stage{width:100%%;min-height:0;display:grid;place-items:center;gap:14px;padding:20px;contain:layout paint}.embed .stage{height:100vh;padding:0}.pswp-gallery{width:100%%;display:grid;place-items:center}.pswp-gallery a{display:block;border:0;padding:0;line-height:0}.pswp-gallery img{display:block;max-width:100%%;max-height:calc(100vh - 132px);object-fit:contain;background:#06080b}.video-shell{position:relative;width:min(100%%,1280px);contain:layout paint}.video-shell video{display:block;width:100%%;max-height:calc(100vh - 188px);aspect-ratio:16/9;object-fit:contain;background:#06080b;border-radius:8px}.embed .video-shell,.embed video{width:100%%;height:100vh;max-height:none;border-radius:0}.caption-overlay{position:absolute;left:50%%;bottom:18px;transform:translateX(-50%%);max-width:min(92%%,980px);padding:7px 12px;border-radius:6px;background:rgba(0,0,0,.68);color:#fff;font-size:clamp(16px,2vw,24px);line-height:1.35;text-align:center;white-space:pre-wrap;pointer-events:none}.caption-overlay:empty{display:none}.caption-tools{width:min(100%%,720px);display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px}.caption-tools input[type=url],.caption-tools input[type=file]{min-width:0;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:#10151b;color:#f7f3e8;padding:9px 10px;font:inherit}.caption-file{display:grid;place-items:center;border:1px solid rgba(255,255,255,.28);border-radius:6px;padding:0 12px;font-weight:800;cursor:pointer}.caption-file input{position:absolute;inline-size:1px;block-size:1px;opacity:0}.audio-card,.file-card{width:min(720px,calc(100%% - 32px));display:grid;gap:16px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#171c23;padding:20px}.audio-art{width:92px;height:92px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.22);border-radius:8px;background:#222b35;color:#ffd44d;font-size:32px;font-weight:900}.audio-card strong{overflow-wrap:anywhere}.audio-card audio{width:100%%}.caption-panel{min-height:58px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:#10151b;color:#f7f3e8;padding:12px;text-align:center;white-space:pre-wrap;line-height:1.45}.caption-panel:empty{display:none}.file-icon{width:64px;height:64px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.24);border-radius:8px;background:#222b35;color:#ffd44d;font-size:24px;font-weight:900}.file-card dl{display:grid;gap:8px;margin:0}.file-card div{display:grid;grid-template-columns:72px minmax(0,1fr);gap:10px}.file-card dt{color:#9eb5c7;font-weight:800}.file-card dd{margin:0;overflow-wrap:anywhere}.download-primary{width:max-content;background:#ffd44d;color:#15120a;border-color:#ffd44d}@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.stage{padding:12px}.pswp-gallery img,.video-shell video{max-height:calc(100vh - 210px)}.caption-tools{grid-template-columns:1fr 1fr}.caption-tools input[type=url]{grid-column:1/-1}}
 </style>
 </head>
 <body class="%s">
 %s
 <main class="stage">%s</main>
+%s
 </body>
-</html>`, html.EscapeString(robots), html.EscapeString(title), html.EscapeString(description), html.EscapeString(previewURL), html.EscapeString(ogType), html.EscapeString(title), html.EscapeString(description), html.EscapeString(previewURL), extraMeta.String(), html.EscapeString(bodyClass), chrome, media.String())
+</html>`, html.EscapeString(robots), html.EscapeString(title), html.EscapeString(description), html.EscapeString(previewURL), html.EscapeString(ogType), html.EscapeString(title), html.EscapeString(ogDescription), html.EscapeString(previewURL), html.EscapeString(title), html.EscapeString(ogDescription), extraMeta.String(), stylesheets, html.EscapeString(bodyClass), chrome, media.String(), scripts)
+}
+
+func imagePreviewSize(f myfiles.File) (int, int) {
+	if f.ImageWidth != nil && f.ImageHeight != nil && *f.ImageWidth > 0 && *f.ImageHeight > 0 {
+		return *f.ImageWidth, *f.ImageHeight
+	}
+	return 1200, 800
+}
+
+func captionControls() string {
+	return `<div class="caption-tools"><input data-caption-url type="url" inputmode="url" placeholder="字幕 URL"><button data-caption-load type="button">加载</button><label class="caption-file">文件<input data-caption-file type="file" accept=".vtt,.srt,.lrc,text/vtt,application/x-subrip,text/plain"></label></div>`
+}
+
+func previewSubtitleURL(r *http.Request) string {
+	for _, key := range []string{"subtitle", "sub", "caption", "captions"} {
+		if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func previewEnhancementScript(kind, subtitleURL string) string {
+	switch kind {
+	case "image":
+		return `<script type="module">
+import PhotoSwipeLightbox from "/vendor/photoswipe/photoswipe-lightbox.esm.min.js";
+const lightbox = new PhotoSwipeLightbox({
+  gallery: ".pswp-gallery",
+  children: "a",
+  pswpModule: () => import("/vendor/photoswipe/photoswipe.esm.min.js")
+});
+lightbox.init();
+</script>`
+	case "video", "audio":
+		encodedURL, _ := json.Marshal(subtitleURL)
+		return `<script>
+const initialSubtitleURL = ` + string(encodedURL) + `;
+const media = document.querySelector("[data-caption-media]");
+const live = document.querySelector("[data-caption-live]");
+const input = document.querySelector("[data-caption-url]");
+const loadButton = document.querySelector("[data-caption-load]");
+const fileInput = document.querySelector("[data-caption-file]");
+let cues = [];
+let activeIndex = -1;
+function toSeconds(raw) {
+  const value = raw.trim().replace(",", ".");
+  const parts = value.split(":").map(Number);
+  if (parts.some(Number.isNaN)) return NaN;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0];
+}
+function cleanCaptionText(text) {
+  return text.replace(/<[^>]+>/g, "").replace(/\r/g, "").trim();
+}
+function parseTimedText(text) {
+  const normalized = text.replace(/\ufeff/g, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const out = [];
+  if (/^\s*WEBVTT/i.test(normalized) || normalized.includes("-->")) {
+    for (const block of normalized.split(/\n{2,}/)) {
+      const lines = block.split("\n").filter(Boolean);
+      const timeLine = lines.findIndex((line) => line.includes("-->"));
+      if (timeLine < 0) continue;
+      const times = lines[timeLine].split("-->");
+      const start = toSeconds(times[0]);
+      const end = toSeconds(times[1].split(/\s+/)[0]);
+      const caption = cleanCaptionText(lines.slice(timeLine + 1).join("\n"));
+      if (Number.isFinite(start) && Number.isFinite(end) && caption) out.push({ start, end, text: caption });
+    }
+  } else {
+    for (const line of normalized.split("\n")) {
+      const matches = [...line.matchAll(/\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]/g)];
+      if (!matches.length) continue;
+      const caption = cleanCaptionText(line.replace(/\[[^\]]+\]/g, ""));
+      if (!caption) continue;
+      for (const match of matches) {
+        const start = toSeconds(match[1]);
+        if (Number.isFinite(start)) out.push({ start, end: start + 5, text: caption });
+      }
+    }
+  }
+  out.sort((a, b) => a.start - b.start);
+  for (let i = 0; i < out.length; i += 1) {
+    if (!Number.isFinite(out[i].end) || out[i].end <= out[i].start) {
+      out[i].end = i + 1 < out.length ? out[i + 1].start : out[i].start + 5;
+    }
+  }
+  return out;
+}
+function setStatus(message) {
+  if (live) live.textContent = message || "";
+}
+function activateCues(next) {
+  cues = next;
+  activeIndex = -1;
+  setStatus(cues.length ? "" : "未识别到字幕");
+  updateCaption();
+}
+async function loadCaptionURL(url) {
+  if (!url) return;
+  setStatus("字幕加载中");
+  const response = await fetch(url, { credentials: "same-origin" });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  activateCues(parseTimedText(await response.text()));
+}
+function updateCaption() {
+  if (!media || !live || cues.length === 0) return;
+  const now = media.currentTime;
+  const index = cues.findIndex((cue) => now >= cue.start && now <= cue.end);
+  if (index === activeIndex) return;
+  activeIndex = index;
+  live.textContent = index >= 0 ? cues[index].text : "";
+}
+if (input && initialSubtitleURL) input.value = initialSubtitleURL;
+if (loadButton) {
+  loadButton.addEventListener("click", () => {
+    loadCaptionURL(input ? input.value.trim() : "").catch(() => setStatus("字幕加载失败"));
+  });
+}
+if (fileInput) {
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => activateCues(parseTimedText(String(reader.result || "")));
+    reader.onerror = () => setStatus("字幕加载失败");
+    reader.readAsText(file);
+  });
+}
+if (media) {
+  media.addEventListener("timeupdate", updateCaption);
+  media.addEventListener("seeked", updateCaption);
+}
+if (initialSubtitleURL) loadCaptionURL(initialSubtitleURL).catch(() => setStatus("字幕加载失败"));
+</script>`
+	default:
+		return ""
+	}
 }
 
 func publicOGImagePath(id, name string) string {
-	return "/og/" + strings.TrimPrefix(publicFilePath(id, name), "/f/") + ".svg"
+	return "/og/" + strings.TrimPrefix(publicFilePath(id, name), "/files/") + ".jpg"
 }
 
 func (a *App) handlePublicOGImage(w http.ResponseWriter, r *http.Request) {
@@ -1507,40 +2213,253 @@ func (a *App) handlePublicOGImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/og/")
-	rest = strings.TrimSuffix(rest, ".svg")
+	rest = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(rest, ".svg"), ".png"), ".jpg")
 	id := publicFileID(rest)
 	f, err := myfiles.GetFile(a.db, id, false)
-	if err != nil || !f.IsPublic || f.Status != "active" || !isPreviewableMedia(f.MIME) {
+	if err != nil || !f.IsPublic || f.Status != "active" || !isPreviewableMedia(f.MIME, f.OriginalName) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
-	title := f.OriginalName
-	if title == "" {
-		title = f.ID
+	if mediaKind(f.MIME, f.OriginalName) == "video" {
+		poster, err := a.videoPosterPath(r.Context(), f)
+		if err == nil {
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Header().Set("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800")
+			http.ServeFile(w, r, poster)
+			return
+		}
 	}
-	kind := strings.ToUpper(mediaKind(f.MIME))
-	fmt.Fprintf(w, `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-<rect width="1200" height="630" fill="#11151b"/>
-<rect x="56" y="56" width="1088" height="518" rx="22" fill="#171c23" stroke="#34404f" stroke-width="2"/>
-<text x="92" y="142" fill="#9eb5c7" font-family="system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="28" font-weight="800">MYFILES %s</text>
-<text x="92" y="278" fill="#f7f3e8" font-family="system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="58" font-weight="800">%s</text>
-<text x="92" y="356" fill="#bec8d2" font-family="system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="30">%s · %s</text>
-<circle cx="1010" cy="318" r="78" fill="#ffd44d"/>
-<path d="M982 270 L1064 318 L982 366 Z" fill="#11151b"/>
-</svg>`, html.EscapeString(kind), html.EscapeString(svgLine(title, 30)), html.EscapeString(f.MIME), html.EscapeString(formatBytes(f.Size)))
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
+	_ = png.Encode(w, blankOGImage())
 }
 
-func svgLine(value string, maxRunes int) string {
-	runes := []rune(value)
-	if len(runes) <= maxRunes {
-		return value
+func (a *App) videoPosterPath(ctx context.Context, f myfiles.File) (string, error) {
+	cacheDir := filepath.Join(a.cfg.App.DataDir, "cache", "posters")
+	if err := os.MkdirAll(cacheDir, 0750); err != nil {
+		return "", err
 	}
-	if maxRunes <= 1 {
-		return string(runes[:maxRunes])
+	posterPath := filepath.Join(cacheDir, f.ID+".jpg")
+	if info, err := os.Stat(posterPath); err == nil && info.Size() > 0 && posterLooksUsable(posterPath) {
+		return posterPath, nil
 	}
-	return string(runes[:maxRunes-1]) + "…"
+	_ = os.Remove(posterPath)
+	source := a.videoPosterSource(f)
+	if source == "" {
+		return "", fmt.Errorf("missing poster source")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	if attached, err := a.extractAttachedPoster(ctx, cacheDir, f.ID, source); err == nil && posterLooksUsable(attached) {
+		if err := os.Rename(attached, posterPath); err != nil {
+			_ = os.Remove(attached)
+			return "", err
+		}
+		return posterPath, nil
+	}
+	if frame, err := extractBestPosterFrame(ctx, cacheDir, f.ID, source); err == nil {
+		if err := os.Rename(frame, posterPath); err != nil {
+			_ = os.Remove(frame)
+			return "", err
+		}
+		return posterPath, nil
+	}
+	return "", fmt.Errorf("no usable poster")
+}
+
+func (a *App) downloadStoredThumbnail(ctx context.Context, cacheDir string, f myfiles.File) (string, error) {
+	if f.StorageProvider != "tgbots" || strings.TrimSpace(f.ThumbnailFileID) == "" {
+		return "", fmt.Errorf("missing thumbnail file id")
+	}
+	cfg := a.snapshotConfig()
+	url := storage.FetchURL(cfg.Storage.UploadURL, cfg.Storage.APIKey, f.ThumbnailFileID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := storage.NewTGBotsHTTPClient(cfg.Storage).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("thumbnail fetch failed: HTTP %d", resp.StatusCode)
+	}
+	tmpPath := filepath.Join(cacheDir, f.ID+"."+ids.New("thumb")+".jpg")
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, io.LimitReader(resp.Body, 16<<20)); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	return tmpPath, nil
+}
+
+func (a *App) extractAttachedPoster(ctx context.Context, cacheDir, id, source string) (string, error) {
+	tmpPath := filepath.Join(cacheDir, id+"."+ids.New("cover")+".jpg")
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", source, "-map", "0:v:m:attached_pic", "-frames:v", "1", tmpPath)
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	return tmpPath, nil
+}
+
+func extractBestPosterFrame(ctx context.Context, cacheDir, id, source string) (string, error) {
+	var bestPath string
+	bestScore := -1.0
+	for _, ts := range posterCandidateTimes(ctx, source) {
+		tmpPath := filepath.Join(cacheDir, id+"."+ids.New("frame")+".jpg")
+		if err := extractPosterFrame(ctx, source, tmpPath, ts); err != nil {
+			_ = os.Remove(tmpPath)
+			continue
+		}
+		score, ok := posterQuality(tmpPath)
+		if !ok {
+			_ = os.Remove(tmpPath)
+			continue
+		}
+		if score > bestScore {
+			if bestPath != "" {
+				_ = os.Remove(bestPath)
+			}
+			bestPath = tmpPath
+			bestScore = score
+			continue
+		}
+		_ = os.Remove(tmpPath)
+	}
+	if bestPath == "" {
+		return "", fmt.Errorf("no usable poster frame")
+	}
+	return bestPath, nil
+}
+
+func posterCandidateTimes(ctx context.Context, source string) []string {
+	seconds := []float64{3, 8, 15, 30, 60}
+	if duration := probeVideoDuration(ctx, source); duration > 0 {
+		for _, pct := range []float64{0.08, 0.15, 0.25, 0.38, 0.5} {
+			seconds = append(seconds, duration*pct)
+		}
+		seconds = append(seconds, duration-2)
+	}
+	seen := map[int]bool{}
+	out := make([]string, 0, len(seconds))
+	for _, sec := range seconds {
+		if sec < 0.5 {
+			continue
+		}
+		key := int(sec * 10)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, fmt.Sprintf("%.3f", sec))
+	}
+	if len(out) == 0 {
+		return []string{"1.000"}
+	}
+	return out
+}
+
+func probeVideoDuration(ctx context.Context, source string) float64 {
+	cmd := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", source)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return v
+}
+
+func extractPosterFrame(ctx context.Context, source, tmpPath, ts string) error {
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", ts, "-i", source, "-frames:v", "1", "-vf", "scale=w='min(1280,iw)':h=-2", "-q:v", "3", tmpPath)
+	return cmd.Run()
+}
+
+func posterLooksUsable(path string) bool {
+	_, ok := posterQuality(path)
+	return ok
+}
+
+func posterQuality(path string) (float64, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	img, err := jpeg.Decode(f)
+	if err != nil {
+		return 0, false
+	}
+	b := img.Bounds()
+	totalPixels := b.Dx() * b.Dy()
+	if totalPixels <= 0 {
+		return 0, false
+	}
+	step := totalPixels / 50000
+	if step < 1 {
+		step = 1
+	}
+	var count int
+	var sum, sumSq float64
+	i := 0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if i%step != 0 {
+				i++
+				continue
+			}
+			r, g, bl, _ := img.At(x, y).RGBA()
+			luma := 0.2126*float64(r>>8) + 0.7152*float64(g>>8) + 0.0722*float64(bl>>8)
+			sum += luma
+			sumSq += luma * luma
+			count++
+			i++
+		}
+	}
+	if count == 0 {
+		return 0, false
+	}
+	mean := sum / float64(count)
+	variance := sumSq/float64(count) - mean*mean
+	if mean < 12 || mean > 244 || variance < 80 {
+		return variance + mean, false
+	}
+	return variance + mean, true
+}
+
+func (a *App) videoPosterSource(f myfiles.File) string {
+	if f.StorageProvider == "local" && f.StorageURL != "" {
+		return f.StorageURL
+	}
+	if f.StorageProvider == "tgbots" && f.StorageFileID != "" {
+		cfg := a.snapshotConfig()
+		if storage.ValidBotToken(cfg.Storage.APIKey) {
+			return storage.FetchURL(cfg.Storage.UploadURL, cfg.Storage.APIKey, f.StorageFileID)
+		}
+	}
+	return strings.TrimSpace(f.StorageURL)
+}
+
+func blankOGImage() image.Image {
+	const width, height = 1200, 630
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for i := 3; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 255
+	}
+	return img
 }
 
 func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles.File) {
@@ -1567,18 +2486,14 @@ func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles
 		writeError(w, resp.StatusCode, "storage_fetch_failed", "存储回源返回错误", nil)
 		return
 	}
-	w.Header().Set("Content-Type", f.MIME)
+	w.Header().Set("Content-Type", effectiveFileMIME(f))
 	w.Header().Set("Content-Disposition", contentDisposition(r, f))
 	copyResponseHeader(w, resp, "Accept-Ranges")
 	copyResponseHeader(w, resp, "Content-Length")
 	copyResponseHeader(w, resp, "Content-Range")
 	copyResponseHeader(w, resp, "ETag")
 	copyResponseHeader(w, resp, "Last-Modified")
-	if f.IsPublic {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	} else {
-		w.Header().Set("Cache-Control", "private, max-age=0, no-store")
-	}
+	setStoredFileCacheHeaders(w, f, f.IsPublic)
 	status := resp.StatusCode
 	if status < 200 || status >= 400 {
 		status = http.StatusOK
@@ -1587,7 +2502,7 @@ func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles
 	if r.Method == http.MethodHead {
 		return
 	}
-	buf := make([]byte, 256*1024)
+	buf := make([]byte, 1024*1024)
 	_, _ = io.CopyBuffer(w, resp.Body, buf)
 }
 
@@ -1608,9 +2523,9 @@ func (a *App) handlePublicFileInfo(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "file": map[string]any{
-		"id": f.ID, "name": f.OriginalName, "mime": f.MIME, "size": f.Size, "sha256": f.SHA256,
+		"id": f.ID, "name": f.OriginalName, "mime": effectiveFileMIME(f), "size": f.Size, "sha256": f.SHA256,
 		"imageWidth": f.ImageWidth, "imageHeight": f.ImageHeight, "requireConfirm": f.RequireConfirm, "url": publicFilePath(f.ID, f.OriginalName),
-		"previewUrl": publicPreviewPath(f.ID, f.OriginalName), "embedUrl": publicEmbedPath(f.ID, f.OriginalName),
+		"previewUrl": publicFilePath(f.ID, f.OriginalName), "embedUrl": publicFilePath(f.ID, f.OriginalName),
 	}})
 }
 
@@ -1624,8 +2539,66 @@ func (a *App) handlePublicFileConfirm(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	f, _ := myfiles.GetFile(a.db, id, false)
-	http.SetCookie(w, &http.Cookie{Name: "myfiles_file_confirm_" + id, Value: "1", Path: "/f/" + id, MaxAge: 3600, Secure: a.cfg.Security.CookieSecure, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "myfiles_file_confirm_" + id, Value: "1", Path: "/files/" + id, MaxAge: 3600, Secure: a.cfg.Security.CookieSecure, SameSite: http.SameSiteLaxMode})
 	writeJSON(w, 200, map[string]any{"ok": true, "url": publicFilePath(id, f.OriginalName)})
+}
+
+func (a *App) handlePublicFileDownloadConfirm(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	f, err := myfiles.GetFile(a.db, id, false)
+	if err != nil || !f.IsPublic || f.Status != "active" {
+		http.NotFound(w, r)
+		return
+	}
+	if isPreviewableMedia(f.MIME, f.OriginalName) {
+		http.Redirect(w, r, publicFilePath(f.ID, f.OriginalName), http.StatusSeeOther)
+		return
+	}
+	a.confirmDownload(w, r, downloadConfirmCookieName("file", f.ID), "/files")
+	http.Redirect(w, r, publicFilePath(f.ID, f.OriginalName)+"/download", http.StatusSeeOther)
+}
+
+func (a *App) handlePublicFileDownload(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	f, err := myfiles.GetFile(a.db, id, false)
+	if err != nil || !f.IsPublic || f.Status != "active" {
+		http.NotFound(w, r)
+		return
+	}
+	if isPreviewableMedia(f.MIME, f.OriginalName) {
+		http.Redirect(w, r, publicFilePath(f.ID, f.OriginalName), http.StatusSeeOther)
+		return
+	}
+	name := downloadConfirmCookieName("file", f.ID)
+	if !a.hasDownloadConfirmation(r, name) {
+		http.Redirect(w, r, publicFilePath(f.ID, f.OriginalName), http.StatusSeeOther)
+		return
+	}
+	a.clearDownloadConfirmation(w, r, name, "/files")
+	a.serveStoredFile(w, r, f, true)
+}
+
+func (a *App) confirmDownload(w http.ResponseWriter, r *http.Request, name, path string) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "1", Path: path, MaxAge: 60, Secure: a.cfg.Security.CookieSecure, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+}
+
+func (a *App) hasDownloadConfirmation(r *http.Request, name string) bool {
+	c, err := r.Cookie(name)
+	return err == nil && c.Value == "1"
+}
+
+func (a *App) clearDownloadConfirmation(w http.ResponseWriter, r *http.Request, name, path string) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: path, MaxAge: -1, Secure: a.cfg.Security.CookieSecure, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+}
+
+func downloadConfirmCookieName(parts ...string) string {
+	return "myfiles_download_confirm_" + strings.NewReplacer("/", "_", ".", "_", "-", "_").Replace(strings.Join(parts, "_"))
 }
 
 func publicFileID(value string) string {
@@ -1639,9 +2612,22 @@ func publicFileID(value string) string {
 func publicFilePath(id, name string) string {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
 	if ext == "" || len(ext) > 12 || strings.ContainsAny(ext, `/\`) {
-		return "/f/" + id
+		return "/files/" + id
 	}
-	return "/f/" + id + ext
+	return "/files/" + id + ext
+}
+
+func publicRawFilePath(id, name string) string {
+	return "/files/raw/" + strings.TrimPrefix(publicFilePath(id, name), "/files/")
+}
+
+func canonicalPublicURL(f myfiles.File) string {
+	return publicFilePath(f.ID, f.OriginalName)
+}
+
+func redirectNoStore(w http.ResponseWriter, r *http.Request, target string) {
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 }
 
 func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request, allow func(MyfilesPermissions) bool) (*Session, bool) {
@@ -1726,12 +2712,12 @@ func legacyConsoleTarget(p string) string {
 func (a *App) redirectLegacyUploadResult(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	if code != "" {
-		http.Redirect(w, r, "/download?code="+url.QueryEscape(code), http.StatusFound)
+		http.Redirect(w, r, "/?code="+url.QueryEscape(code), http.StatusFound)
 		return
 	}
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/uploads"), "/")
 	if id != "" {
-		http.Redirect(w, r, "/download?upload="+url.QueryEscape(id), http.StatusFound)
+		http.Redirect(w, r, "/?upload="+url.QueryEscape(id), http.StatusFound)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusFound)

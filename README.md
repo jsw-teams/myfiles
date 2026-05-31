@@ -11,7 +11,8 @@ The current UI uses a unified pixel style with a friendly black bear mascot. Sit
 | `/` | Public upload and pickup-code shortcut |
 | `/login` | Unified account login entry |
 | `/dashboard` | User console and permissioned admin console |
-| `/download` | Upload result, pickup-code result, and non-image download confirmation |
+| `/files/{fileId}.{ext}` | Canonical file preview/open URL |
+| `/pickup/{pickupCode}/{fileId}.{ext}` | Canonical pickup-code file preview/open URL |
 
 Legacy console and upload-result paths redirect to these routes:
 
@@ -19,18 +20,18 @@ Legacy console and upload-result paths redirect to these routes:
 - `/a/files` -> `/dashboard#admin-files`
 - `/a/audit` -> `/dashboard#audit`
 - `/a/settings` -> `/dashboard#settings`
-- `/uploads/{batch}` -> `/download?upload={batch}`
+- `/uploads/{batch}` -> `/?upload={batch}`
 
 ## User Flow
 
 - Visitors upload from `/`.
 - Pending files can be removed before upload starts.
 - Active uploads run in a modal with real-time progress and a cancel action.
-- A successful upload creates a 24-hour pickup code and redirects to `/download?upload={batchId}`.
-- `/download` shows the pickup code, a copy-link button, and the uploaded file list.
-- Pickup links use `/download?code={pickupCode}`.
+- A successful upload creates a 24-hour pickup code and redirects to `/?upload={batchId}`.
+- `/?upload={batchId}` shows the pickup code, a copy-link button, and the uploaded file list.
+- Pickup links use `/?code={pickupCode}`.
 - Pickup file access uses `/pickup/{pickupCode}/{fileId}`.
-- Non-image files use `/download?next={filePath}` as a confirmation page before download.
+- Files use `/files/{fileId}.{ext}` for preview/open. Previewable media opens in the myfiles preview page with responsive media sizing; files that cannot be previewed online show an in-page safety confirmation before download.
 - File rows use type-specific visual badges for images, video, audio, archives, code, documents, spreadsheets, and presentations.
 - Logged-in users can manage their own files, create pickup codes, and expire pickup codes early.
 

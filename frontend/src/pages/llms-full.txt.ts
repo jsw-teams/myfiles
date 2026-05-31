@@ -12,10 +12,10 @@ Architecture:
 
 Public pages:
 - /
-- /file/{id}
-- /file/{id}/info
+- /files/{id}.{ext}
+- /files/{id}.{ext}/info
 - /?code={pickupCode}
-- /pickup/{pickupCode}/{fileId}
+- /pickup/{pickupCode}/{fileId}.{ext}
 
 Sharing:
 - Upload batches receive a 24-hour pickup code.

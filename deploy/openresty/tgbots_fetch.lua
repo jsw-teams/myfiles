@@ -131,15 +131,20 @@ local function stream_local_file(abs_path)
     end
 
     local remaining = length
+    local flushed = 0
     while remaining > 0 do
-        local chunk = f:read(math.min(65536, remaining))
+        local chunk = f:read(math.min(1048576, remaining))
         if not chunk then break end
         remaining = remaining - #chunk
+        flushed = flushed + #chunk
         ngx.print(chunk)
-        local ok_flush, flush_err = ngx.flush(true)
-        if not ok_flush then
-            f:close()
-            return ngx.exit(499)
+        if flushed >= 4194304 then
+            flushed = 0
+            local ok_flush, flush_err = ngx.flush(false)
+            if not ok_flush then
+                f:close()
+                return ngx.exit(499)
+            end
         end
     end
     f:close()

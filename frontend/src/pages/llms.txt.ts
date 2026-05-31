@@ -11,7 +11,8 @@ Public purpose:
 
 Public helper paths:
 - /?code=<pickupCode> resolves a valid pickup code into a temporary file list.
-- /pickup/<pickupCode>/<fileId> streams a file while the pickup code is valid.
+- /files/<fileId>.<ext> opens the canonical file preview URL.
+- /pickup/<pickupCode>/<fileId>.<ext> opens a file while the pickup code is valid.
 
 Private paths such as /dashboard, /api, /admin and /setup are not intended for indexing.
 `, { headers: { "Content-Type": "text/plain; charset=utf-8" } });

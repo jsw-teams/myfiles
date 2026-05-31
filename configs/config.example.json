@@ -28,7 +28,7 @@
     "local_dir": "/var/lib/myfiles/storage"
   },
   "upload": {
-    "max_bytes": 104857600,
+    "max_bytes": 2147483648,
     "allowed_mime_types": ["*/*"],
     "allow_anonymous": true
   },

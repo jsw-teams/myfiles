@@ -77,6 +77,8 @@ type AuditConfig struct {
 	RetentionDays int `json:"retention_days"`
 }
 
+const DefaultUploadMaxBytes int64 = 2 * 1024 * 1024 * 1024
+
 func Load(path string) (Config, error) {
 	cfg := Default()
 	raw, err := os.ReadFile(path)
@@ -114,7 +116,7 @@ func Default() Config {
 	cfg.Database.Path = "./data/myfiles.sqlite3"
 	cfg.Account = AccountConfig{ClientName: "myfiles", ClientID: "myfiles", LoginURL: "https://account.js.gripe/login", AccountBaseURL: "https://gateway.js.gripe/api/v1/myaccount", MeURL: "https://gateway.js.gripe/api/v1/myaccount/me", RedirectURI: "http://127.0.0.1:19110/auth/account/callback", Scopes: []string{"accounts:read", "identities:resolve"}}
 	cfg.Storage = StorageConfig{Mode: "local", PublicBaseURL: cfg.App.BaseURL, TimeoutSeconds: 120, LocalDir: "./data/storage"}
-	cfg.Upload = UploadConfig{MaxBytes: 100 * 1024 * 1024, AllowedMIMETypes: []string{"*/*"}, AllowAnonymous: true}
+	cfg.Upload = UploadConfig{MaxBytes: DefaultUploadMaxBytes, AllowedMIMETypes: []string{"*/*"}, AllowAnonymous: true}
 	cfg.File = FileConfig{DefaultPublic: true, DefaultRequireConfirm: false, DefaultRegionPolicy: "global", DefaultHotlinkPolicy: "allow"}
 	cfg.Security = SecurityConfig{SessionCookieName: "myfiles_session", SessionTTLHours: 168, CookieSecure: false}
 	cfg.Audit = AuditConfig{RetentionDays: 180}
@@ -162,7 +164,7 @@ func normalize(cfg *Config) {
 		cfg.Storage.LocalDir = cfg.App.DataDir + "/storage"
 	}
 	if cfg.Upload.MaxBytes <= 0 {
-		cfg.Upload.MaxBytes = 100 * 1024 * 1024
+		cfg.Upload.MaxBytes = DefaultUploadMaxBytes
 	}
 	if len(cfg.Upload.AllowedMIMETypes) == 0 {
 		cfg.Upload.AllowedMIMETypes = []string{"*/*"}

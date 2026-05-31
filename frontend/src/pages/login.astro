@@ -28,6 +28,12 @@ import Base from "../layouts/Base.astro";
     const showError = (text) => { alertBox.textContent = text || labels.loginError; alertBox.style.display = "block"; };
     const params = new URLSearchParams(location.search);
     if (params.get("error")) showError(labels.loginRetry);
+    fetch("/api/account/me", { cache: "no-store" })
+      .then((res) => res.ok ? res.json() : null)
+      .then((json) => {
+        if (json?.ok) location.replace("/dashboard");
+      })
+      .catch(() => {});
 
     btn.addEventListener("click", () => {
       alertBox.style.display = "none";

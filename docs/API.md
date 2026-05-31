@@ -12,12 +12,16 @@ All JSON errors use:
 - `POST /api/upload`
 - `GET /api/uploads/{batchId}`
 - `GET /api/pickup/{pickupCode}`
-- `GET /pickup/{pickupCode}/{fileId}`
-- `GET /file/{id}`
-- `GET /file/{id}/info`
-- `POST /file/{id}/confirm`
+- `GET /files/{id}.{ext}`
+- `POST /files/{id}.{ext}/download-confirm`
+- `GET /files/{id}.{ext}/download`
+- `GET /files/{id}.{ext}/info`
+- `POST /files/{id}.{ext}/confirm`
+- `GET /pickup/{pickupCode}/{fileId}.{ext}`
+- `POST /pickup/{pickupCode}/{fileId}.{ext}/download-confirm`
+- `GET /pickup/{pickupCode}/{fileId}.{ext}/download`
 
-Non-image files served from local storage or tgbots show a download confirmation page first. Use `?download=1` after user confirmation to stream the file as an attachment. External storage links are redirected without this confirmation page.
+`/files/{id}.{ext}` is the canonical preview/open URL. Previewable media opens in the myfiles preview page while media element requests on the same URL stream the original bytes with range support. Files that cannot be previewed online show an in-page safety confirmation; confirmed downloads are authorized by the application with a short-lived cookie rather than a URL parameter.
 
 ## Account
 

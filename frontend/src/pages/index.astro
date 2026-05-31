@@ -22,6 +22,11 @@ import Base from "../layouts/Base.astro";
           </div>
         </div>
 
+        <div class="home-actions" aria-live="polite">
+          <a id="account-login" class="pixel-button secondary compact" href="/login" data-i18n="accountLogin">统一账户登录</a>
+          <a id="account-dashboard" class="pixel-button compact" href="/dashboard" hidden data-i18n="dashboardButton">进入控制台</a>
+        </div>
+
         <section class="action-panel pickup-panel">
           <div>
             <div class="panel-title"><span class="icon" aria-hidden="true">
@@ -49,16 +54,13 @@ import Base from "../layouts/Base.astro";
           </span><span data-i18n="uploadTitle">上传文件</span></div>
           <label class="upload-zone">
             <strong data-i18n="uploadChoose">选择或拖放文件</strong>
-            <p class="muted" data-i18n="uploadDesc">上传完成后会生成 24 小时取件码，可发给对方快捷获取。</p>
+            <p id="upload-desc" class="muted" data-i18n="uploadDesc">上传完成后会生成 24 小时取件码，可发给对方快捷获取。</p>
             <input id="file-input" name="files" type="file" multiple hidden />
           </label>
           <div id="selected" class="file-list"></div>
           <button class="pixel-button" type="submit" data-i18n="uploadButton">上传文件</button>
         </form>
 
-        <div class="home-actions">
-          <a class="pixel-button secondary" href="/login" data-i18n="accountLogin">统一账户登录</a>
-        </div>
         <div id="status" role="alert"></div>
         <section id="result-panel" class="action-panel grid" hidden>
           <div class="panel-title"><span class="icon" aria-hidden="true">
@@ -85,7 +87,7 @@ import Base from "../layouts/Base.astro";
       </div>
     </div>
   </main>
-  <script type="module" src="/app/upload-result.js?v=20260516m"></script>
+  <script type="module" src="/app/upload-result.js?v=20260529a"></script>
   <script>
     const form = document.querySelector("#upload-form");
     const input = document.querySelector("#file-input");
@@ -98,12 +100,17 @@ import Base from "../layouts/Base.astro";
     const pickupForm = document.querySelector("#pickup-form");
     const pickupInput = document.querySelector("#pickup-code");
     const pickupStatus = document.querySelector("#pickup-status");
-    let labels = { fileBadge: "文件" };
+    const accountLogin = document.querySelector("#account-login");
+    const accountDashboard = document.querySelector("#account-dashboard");
+    const uploadDesc = document.querySelector("#upload-desc");
+    let labels = window.siteI18n?.labels || { fileBadge: "文件" };
     let bootstrap = null;
+    let account = null;
     let currentUpload = null;
     let selectedFiles = [];
     fetch("/api/bootstrap").then(r => r.json()).then(j => { bootstrap = j; }).catch(() => {});
-    document.addEventListener("site-i18n-ready", (event) => { labels = event.detail?.labels || labels; });
+    detectAccount();
+    document.addEventListener("site-i18n-ready", (event) => { labels = event.detail?.labels || labels; renderAccountState(); });
 
     cancelUpload.addEventListener("click", () => {
       currentUpload?.abort();
@@ -190,19 +197,17 @@ import Base from "../layouts/Base.astro";
           }
         }
       }
-      const data = new FormData();
-      for (const f of selectedFiles) data.append("files", f);
       status.className = "";
       status.textContent = "";
       uploadModal.hidden = false;
-      setProgress(0, msg("uploadPrepare"));
+      setUploadProgress(0, totalSelectedBytes(), 0, msg("uploadPrepare"));
       let json = {};
       try {
-        json = await uploadWithProgress(data);
-      } catch {
+        json = await uploadWithProgress(selectedFiles);
+      } catch (err) {
         uploadModal.hidden = true;
         status.className = "pixel-alert";
-        status.textContent = msg("networkError");
+        status.textContent = err?.name === "AbortError" ? msg("uploadCancelled") : msg("networkError");
         return;
       }
       if (!json.ok || json.status === "failed") {
@@ -213,40 +218,347 @@ import Base from "../layouts/Base.astro";
         return;
       }
       setProgress(100, msg("uploadDone"));
-      location.href = json.downloadPath || json.resultPath;
+      location.href = json.resultPath || json.downloadPath;
     });
 
-    function uploadWithProgress(data) {
-      return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", "/api/upload");
-        xhr.responseType = "json";
-        currentUpload = xhr;
-        xhr.upload.onprogress = (event) => {
-          if (!event.lengthComputable) {
-            progressText.textContent = msg("uploadWaitingServer");
-            return;
+    async function detectAccount() {
+      try {
+        const res = await fetch("/api/account/me", { cache: "no-store" });
+        const json = await res.json().catch(() => ({}));
+        account = res.ok && json.ok ? json : null;
+      } catch {
+        account = null;
+      }
+      renderAccountState();
+    }
+
+    function renderAccountState() {
+      const signedIn = Boolean(account?.user?.id);
+      uploadDesc.textContent = signedIn ? msg("uploadDescSignedIn") : msg("uploadDesc");
+      accountLogin.hidden = signedIn;
+      accountDashboard.hidden = !signedIn;
+      document.documentElement.dataset.accountState = signedIn ? "signed-in" : "guest";
+    }
+
+    async function uploadWithProgress(files) {
+      const controller = new AbortController();
+      const sessionKey = uploadSessionKey(files);
+      const savedSession = readUploadSession(sessionKey);
+      const activeUpload = {
+        controller,
+        uploadId: "",
+        sessionKey,
+        abort() {
+          controller.abort();
+          if (this.uploadId) cancelChunkUpload(this.uploadId);
+          localStorage.removeItem(this.sessionKey);
+        }
+      };
+      currentUpload = activeUpload;
+      const total = files.reduce((sum, file) => sum + file.size, 0);
+      let completedUploaded = 0;
+      const activeChunkBytes = new Map();
+      const startedAt = performance.now();
+      const uploadPlan = preferredUploadPlan(total);
+
+      try {
+        const init = await fetchJSON("/api/upload/chunk/init", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uploadId: savedSession?.uploadId || "",
+            chunkSize: savedSession?.chunkSize || uploadPlan.chunkSize,
+            files: files.map((file) => ({ name: file.name, size: file.size, type: file.type || "" }))
+          }),
+          signal: controller.signal
+        });
+        if (!init.ok) return init;
+        const uploadId = init.uploadId;
+        const chunkSize = Number(init.chunkSize || 4 * 1024 * 1024);
+        const received = init.received || {};
+        activeUpload.uploadId = uploadId;
+        localStorage.setItem(sessionKey, JSON.stringify({ uploadId, chunkSize, expiresAt: init.expiresAt || "", files: uploadSessionFiles(files) }));
+        completedUploaded = uploadedBytesFromReceived(files, received, chunkSize);
+        if (completedUploaded > 0) {
+          setUploadProgress(completedUploaded, total, speedSince(completedUploaded, startedAt), msg("uploadResuming"));
+        }
+
+        const tasks = [];
+        for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+          const file = files[fileIndex];
+          const chunks = Math.max(1, Math.ceil(file.size / chunkSize));
+          for (let chunkIndex = 0; chunkIndex < chunks; chunkIndex++) {
+            if (received[String(fileIndex)]?.[chunkIndex]) continue;
+            const start = chunkIndex * chunkSize;
+            const end = Math.min(file.size, start + chunkSize);
+            tasks.push({ file, fileIndex, chunkIndex, chunks, start, end, size: end - start });
           }
-          const pct = Math.max(1, Math.round((event.loaded / event.total) * 100));
-          setProgress(pct, msg("uploadedPct").replace("{pct}", pct));
+        }
+        let cursor = 0;
+        let failed = null;
+        const concurrency = Math.min(uploadPlan.concurrency, Math.max(1, tasks.length));
+        const updateProgress = (label) => {
+          let inFlight = 0;
+          activeChunkBytes.forEach((value) => { inFlight += value; });
+          const uploaded = Math.min(total, completedUploaded + inFlight);
+          setUploadProgress(uploaded, total, speedSince(uploaded, startedAt), label);
         };
-        xhr.onload = () => {
-          const body = xhr.response || {};
-          if (xhr.status < 200 || xhr.status >= 300) {
-            body.ok = false;
+        const workers = Array.from({ length: concurrency }, async () => {
+          while (!failed && cursor < tasks.length) {
+            const task = tasks[cursor++];
+            const key = `${task.fileIndex}:${task.chunkIndex}`;
+            const label = msg("uploadingFile").replace("{name}", task.file.name);
+            try {
+              const chunkStartedAt = performance.now();
+              await uploadChunkWithRetry(uploadId, task.fileIndex, task.chunkIndex, task.file.slice(task.start, task.end), controller.signal, (loaded) => {
+                activeChunkBytes.set(key, Math.min(loaded, task.size));
+                updateProgress(label);
+              });
+              rememberUploadSample(task.size, performance.now() - chunkStartedAt, null);
+              activeChunkBytes.delete(key);
+              completedUploaded += task.size;
+              if (!received[String(task.fileIndex)]) received[String(task.fileIndex)] = Array(task.chunks).fill(false);
+              received[String(task.fileIndex)][task.chunkIndex] = true;
+              updateProgress(label);
+            } catch (err) {
+              activeChunkBytes.delete(key);
+              rememberUploadSample(task.size, 0, err);
+              if (isRetryableUploadError(err)) rememberWeakUploadNetwork();
+              if (err?.name === "AbortError") throw err;
+              failed = err;
+              controller.abort();
+            }
           }
-          currentUpload = null;
-          resolve(body);
-        };
-        xhr.onerror = () => { currentUpload = null; reject(); };
-        xhr.onabort = () => { currentUpload = null; resolve({ ok: false, code: "upload_cancelled", error: msg("uploadCancelled") }); };
-        xhr.send(data);
-      });
+        });
+        try {
+          await Promise.all(workers);
+        } catch (err) {
+          if (!failed || err?.name !== "AbortError") throw err;
+        }
+        if (failed) {
+          if (["upload_expired", "upload_not_found"].includes(failed.code)) localStorage.removeItem(sessionKey);
+          return { ok: false, code: failed.code, error: failed.message || msg("uploadFailedGeneric") };
+        }
+
+        setUploadProgress(total, total, speedSince(total, startedAt), msg("uploadFinalizing"));
+        const result = await fetchJSON("/api/upload/chunk/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uploadId }),
+          signal: controller.signal
+        });
+        if (result.ok) {
+          localStorage.removeItem(sessionKey);
+          activeUpload.uploadId = "";
+        }
+        return result;
+      } finally {
+        if (currentUpload === activeUpload) currentUpload = null;
+      }
     }
 
     function setProgress(percent, text) {
       progressBar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
       progressText.textContent = text;
+    }
+
+    function setUploadProgress(uploaded, total, speed, label) {
+      const pct = total > 0 ? Math.round((uploaded / total) * 100) : 0;
+      setProgress(pct, `${label} · ${msg("uploadStats")
+        .replace("{total}", formatSize(total))
+        .replace("{uploaded}", formatSize(uploaded))
+        .replace("{speed}", formatRate(speed))
+        .replace("{pct}", pct)}`);
+    }
+
+    async function fetchJSON(url, options) {
+      const res = await fetch(url, options);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body.ok === false) {
+        return { ok: false, code: body.code, error: body.error || msg("uploadFailedGeneric") };
+      }
+      return body;
+    }
+
+    async function uploadChunkWithRetry(uploadId, fileIndex, chunkIndex, chunk, signal, onProgress) {
+      let lastErr = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (signal?.aborted) throw new DOMException(msg("uploadCancelled"), "AbortError");
+        try {
+          return await uploadChunk(uploadId, fileIndex, chunkIndex, chunk, signal, onProgress);
+        } catch (err) {
+          if (err?.name === "AbortError") throw err;
+          lastErr = err;
+          if (!isRetryableUploadError(err) || attempt === 3) break;
+          onProgress(0);
+          await sleep(800 * (attempt + 1), signal);
+        }
+      }
+      throw lastErr || new Error(msg("uploadFailedGeneric"));
+    }
+
+    function isRetryableUploadError(err) {
+      const status = Number(err?.status || 0);
+      return err?.code === "upload_timeout" || err?.code === "network_error" || [408, 429, 500, 502, 503, 504, 520, 522, 524].includes(status);
+    }
+
+    function preferredUploadPlan(totalBytes) {
+      const fastUntil = Number(localStorage.getItem("myfiles:fast-upload-until") || 0);
+      const connection = navigator.connection || navigator.webkitConnection || navigator.mozConnection;
+      const effectiveType = String(connection?.effectiveType || "");
+      const downlink = Number(connection?.downlink || 0);
+      if (connection?.saveData || /^(slow-2g|2g|3g)$/i.test(effectiveType)) {
+        return { chunkSize: 2 * 1024 * 1024, concurrency: 2 };
+      }
+      if (fastUntil > Date.now() || /^(4g)$/i.test(effectiveType) || downlink >= 8) {
+        return {
+          chunkSize: totalBytes >= 64 * 1024 * 1024 ? 16 * 1024 * 1024 : 8 * 1024 * 1024,
+          concurrency: 4
+        };
+      }
+      if (totalBytes >= 64 * 1024 * 1024) return { chunkSize: 12 * 1024 * 1024, concurrency: 4 };
+      if (totalBytes >= 16 * 1024 * 1024) return { chunkSize: 8 * 1024 * 1024, concurrency: 4 };
+      return { chunkSize: 4 * 1024 * 1024, concurrency: 3 };
+    }
+
+    function rememberWeakUploadNetwork() {
+      localStorage.removeItem("myfiles:fast-upload-until");
+    }
+
+    function rememberFastUploadNetwork() {
+      localStorage.setItem("myfiles:fast-upload-until", String(Date.now() + 6 * 60 * 60 * 1000));
+      localStorage.removeItem("myfiles:weak-upload-until");
+    }
+
+    function rememberUploadSample(bytes, elapsedMs, err) {
+      if (err) return;
+      const seconds = elapsedMs / 1000;
+      if (seconds <= 0 || bytes < 128 * 1024) return;
+      const rate = bytes / seconds;
+      if (rate >= 1024 * 1024) {
+        rememberFastUploadNetwork();
+      } else if (bytes >= 2 * 1024 * 1024 && rate < 96 * 1024) {
+        rememberWeakUploadNetwork();
+      }
+    }
+
+    function sleep(ms, signal) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, ms);
+        signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException(msg("uploadCancelled"), "AbortError"));
+        }, { once: true });
+      });
+    }
+
+    function uploadChunk(uploadId, fileIndex, chunkIndex, chunk, signal, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", `/api/upload/chunk/${encodeURIComponent(uploadId)}/file/${fileIndex}?chunk=${chunkIndex}`);
+        xhr.responseType = "json";
+        xhr.timeout = 95000;
+        const cleanup = () => signal?.removeEventListener("abort", abort);
+        const abort = () => {
+          cleanup();
+          xhr.abort();
+          reject(new DOMException(msg("uploadCancelled"), "AbortError"));
+        };
+        signal?.addEventListener("abort", abort, { once: true });
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) onProgress(event.loaded);
+        };
+        xhr.onload = () => {
+          cleanup();
+          const body = xhr.response || {};
+          if (xhr.status < 200 || xhr.status >= 300 || body.ok === false) {
+            const err = new Error(body.error || msg("uploadFailedGeneric"));
+            err.code = body.code || "upload_failed";
+            err.status = xhr.status;
+            reject(err);
+            return;
+          }
+          resolve(body);
+        };
+        xhr.onerror = () => {
+          cleanup();
+          const err = new Error(msg("networkError"));
+          err.code = "network_error";
+          reject(err);
+        };
+        xhr.ontimeout = () => {
+          cleanup();
+          const err = new Error(msg("networkError"));
+          err.code = "upload_timeout";
+          err.status = 408;
+          reject(err);
+        };
+        xhr.onabort = () => {
+          cleanup();
+          reject(new DOMException(msg("uploadCancelled"), "AbortError"));
+        };
+        xhr.send(chunk);
+      });
+    }
+
+    function cancelChunkUpload(uploadId) {
+      fetch("/api/upload/chunk/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uploadId }),
+        keepalive: true
+      }).catch(() => {});
+    }
+
+    function uploadSessionKey(files) {
+      const payload = uploadSessionFiles(files).map((file) => `${file.name}:${file.size}:${file.type}:${file.lastModified}`).join("|");
+      return `myfiles:chunk-upload:${payload}`;
+    }
+
+    function uploadSessionFiles(files) {
+      return files.map((file) => ({
+        name: file.name,
+        size: file.size,
+        type: file.type || "",
+        lastModified: file.lastModified || 0
+      }));
+    }
+
+    function readUploadSession(key) {
+      try {
+        const value = JSON.parse(localStorage.getItem(key) || "null");
+        if (!value?.uploadId) return null;
+        if (value.expiresAt && Date.parse(value.expiresAt) <= Date.now()) {
+          localStorage.removeItem(key);
+          return null;
+        }
+        return value;
+      } catch {
+        localStorage.removeItem(key);
+        return null;
+      }
+    }
+
+    function uploadedBytesFromReceived(files, received, chunkSize) {
+      let total = 0;
+      files.forEach((file, fileIndex) => {
+        const chunks = received[String(fileIndex)] || [];
+        chunks.forEach((ok, chunkIndex) => {
+          if (!ok) return;
+          const start = chunkIndex * chunkSize;
+          total += Math.max(0, Math.min(file.size, start + chunkSize) - start);
+        });
+      });
+      return total;
+    }
+
+    function totalSelectedBytes() {
+      return selectedFiles.reduce((sum, file) => sum + file.size, 0);
+    }
+
+    function speedSince(uploaded, startedAt) {
+      const seconds = Math.max(0.2, (performance.now() - startedAt) / 1000);
+      return uploaded / seconds;
     }
 
     function firstItemError(json) {
@@ -262,7 +574,10 @@ import Base from "../layouts/Base.astro";
         mime_not_allowed: msg("mimeNotAllowed"),
         storage_upload_failed: msg("storageFailed"),
         db_error: msg("dbFailed"),
-        upload_cancelled: msg("uploadCancelled")
+        upload_cancelled: msg("uploadCancelled"),
+        upload_expired: msg("uploadExpired"),
+        upload_not_found: msg("uploadExpired"),
+        upload_incomplete: msg("uploadIncomplete")
       };
       return messages[code] || fallback || msg("uploadFailedGeneric");
     }
@@ -316,6 +631,10 @@ import Base from "../layouts/Base.astro";
       if (n > 1048576) return (n / 1048576).toFixed(1) + " MiB";
       if (n > 1024) return (n / 1024).toFixed(1) + " KiB";
       return n + " B";
+    }
+
+    function formatRate(n) {
+      return `${formatSize(n)}/s`;
     }
 
     function escapeHtml(value) {

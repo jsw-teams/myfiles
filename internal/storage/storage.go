@@ -28,10 +28,11 @@ type UploadInput struct {
 }
 
 type UploadResult struct {
-	Provider  string `json:"provider"`
-	FileID    string `json:"fileId"`
-	URL       string `json:"url"`
-	PublicURL string `json:"publicUrl"`
+	Provider        string `json:"provider"`
+	FileID          string `json:"fileId"`
+	ThumbnailFileID string `json:"thumbnailFileId,omitempty"`
+	URL             string `json:"url"`
+	PublicURL       string `json:"publicUrl"`
 }
 
 type Uploader interface {
@@ -82,7 +83,8 @@ func (u *LocalUploader) Upload(ctx context.Context, in UploadInput) (UploadResul
 	if err != nil {
 		return UploadResult{}, err
 	}
-	if _, err := io.Copy(out, src); err != nil {
+	buf := make([]byte, 1024*1024)
+	if _, err := io.CopyBuffer(out, src, buf); err != nil {
 		_ = out.Close()
 		return UploadResult{}, err
 	}
@@ -106,10 +108,11 @@ func (u *TGBotsUploader) Upload(ctx context.Context, in UploadInput) (UploadResu
 		return UploadResult{}, fmt.Errorf("missing telegram chat_id")
 	}
 
+	media := telegramUploadMedia(in)
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
 	go func() {
-		err := streamMultipartDocument(writer, in, u.cfg.ChatID)
+		err := streamMultipartTelegramFile(writer, in, u.cfg.ChatID, media)
 		closeErr := writer.Close()
 		if err == nil {
 			err = closeErr
@@ -117,7 +120,7 @@ func (u *TGBotsUploader) Upload(ctx context.Context, in UploadInput) (UploadResu
 		_ = pw.CloseWithError(err)
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tgbotsMethodURL(u.cfg.UploadURL, u.cfg.APIKey, "sendDocument"), pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tgbotsMethodURL(u.cfg.UploadURL, u.cfg.APIKey, media.Method), pr)
 	if err != nil {
 		return UploadResult{}, err
 	}
@@ -153,6 +156,18 @@ func (u *TGBotsUploader) Upload(ctx context.Context, in UploadInput) (UploadResu
 				FileID   string `json:"file_id"`
 				FileName string `json:"file_name"`
 			} `json:"document"`
+			Video *struct {
+				FileID    string `json:"file_id"`
+				Thumbnail *struct {
+					FileID string `json:"file_id"`
+				} `json:"thumbnail"`
+			} `json:"video"`
+			Photo []struct {
+				FileID   string `json:"file_id"`
+				FileSize int64  `json:"file_size"`
+				Width    int    `json:"width"`
+				Height   int    `json:"height"`
+			} `json:"photo"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -165,23 +180,62 @@ func (u *TGBotsUploader) Upload(ctx context.Context, in UploadInput) (UploadResu
 		return UploadResult{}, errors.New(payload.Description)
 	}
 	fileID := ""
+	thumbID := ""
 	if payload.Result.Document != nil {
 		fileID = payload.Result.Document.FileID
+	}
+	if payload.Result.Video != nil {
+		fileID = payload.Result.Video.FileID
+		if payload.Result.Video.Thumbnail != nil {
+			thumbID = payload.Result.Video.Thumbnail.FileID
+		}
+	}
+	if len(payload.Result.Photo) > 0 {
+		best := payload.Result.Photo[0]
+		for _, p := range payload.Result.Photo[1:] {
+			if p.FileSize > best.FileSize || (p.FileSize == best.FileSize && p.Width*p.Height > best.Width*best.Height) {
+				best = p
+			}
+		}
+		fileID = best.FileID
+		thumbID = best.FileID
 	}
 	if fileID == "" {
 		return UploadResult{}, fmt.Errorf("tgbots response missing file id")
 	}
-	return UploadResult{Provider: "tgbots", FileID: fileID, URL: "", PublicURL: u.cfg.PublicBaseURL + publicFilePath(in.FileID, in.Filename)}, nil
+	return UploadResult{Provider: "tgbots", FileID: fileID, ThumbnailFileID: thumbID, URL: "", PublicURL: u.cfg.PublicBaseURL + publicFilePath(in.FileID, in.Filename)}, nil
 }
 
-func streamMultipartDocument(writer *multipart.Writer, in UploadInput, chatID string) error {
+type telegramMedia struct {
+	Method string
+	Field  string
+}
+
+func telegramUploadMedia(in UploadInput) telegramMedia {
+	mimeType := strings.ToLower(strings.TrimSpace(in.MIME))
+	switch {
+	case mimeType == "video/mp4" || mimeType == "video/quicktime":
+		return telegramMedia{Method: "sendVideo", Field: "video"}
+	case mimeType == "image/jpeg" || mimeType == "image/png":
+		return telegramMedia{Method: "sendPhoto", Field: "photo"}
+	default:
+		return telegramMedia{Method: "sendDocument", Field: "document"}
+	}
+}
+
+func streamMultipartTelegramFile(writer *multipart.Writer, in UploadInput, chatID string, media telegramMedia) error {
 	if err := writer.WriteField("chat_id", chatID); err != nil {
 		return err
 	}
 	if err := writer.WriteField("caption", fmt.Sprintf("myfiles:%s sha256:%s size:%d", in.FileID, in.SHA256, in.Size)); err != nil {
 		return err
 	}
-	part, err := writer.CreateFormFile("document", in.Filename)
+	if media.Method == "sendVideo" {
+		if err := writer.WriteField("supports_streaming", "true"); err != nil {
+			return err
+		}
+	}
+	part, err := writer.CreateFormFile(media.Field, in.Filename)
 	if err != nil {
 		return err
 	}
@@ -234,7 +288,7 @@ func FetchURL(baseURL, botToken, fileID string) string {
 func publicFilePath(id, name string) string {
 	ext := filepath.Ext(name)
 	if ext == "" || len(ext) > 12 {
-		return "/f/" + id
+		return "/files/" + id
 	}
-	return "/f/" + id + ext
+	return "/files/" + id + ext
 }

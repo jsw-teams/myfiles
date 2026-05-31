@@ -1,12 +1,26 @@
 package db
 
-import "database/sql"
+import (
+	"database/sql"
+	"net/url"
+	"path/filepath"
+	"strings"
+)
 
 func Migrate(conn *sql.DB) error {
 	if _, err := conn.Exec(schema); err != nil {
 		return err
 	}
-	return ensurePickupColumns(conn)
+	if err := ensurePickupColumns(conn); err != nil {
+		return err
+	}
+	if err := ensureFileColumns(conn); err != nil {
+		return err
+	}
+	if err := normalizeEmptyPickupCodes(conn); err != nil {
+		return err
+	}
+	return migratePublicFileURLs(conn)
 }
 
 func ensurePickupColumns(conn *sql.DB) error {
@@ -44,6 +58,90 @@ func ensurePickupColumns(conn *sql.DB) error {
 	return err
 }
 
+func ensureFileColumns(conn *sql.DB) error {
+	rows, err := conn.Query(`PRAGMA table_info(files)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !cols["thumbnail_file_id"] {
+		if _, err := conn.Exec(`ALTER TABLE files ADD COLUMN thumbnail_file_id TEXT`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeEmptyPickupCodes(conn *sql.DB) error {
+	_, err := conn.Exec(`UPDATE upload_batches SET pickup_code=NULL, pickup_expires_at=NULL WHERE pickup_code=''`)
+	return err
+}
+
+func migratePublicFileURLs(conn *sql.DB) error {
+	rows, err := conn.Query(`SELECT id, original_name, public_url FROM files`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type fileURL struct {
+		id        string
+		name      string
+		publicURL string
+	}
+	var files []fileURL
+	for rows.Next() {
+		var f fileURL
+		if err := rows.Scan(&f.id, &f.name, &f.publicURL); err != nil {
+			return err
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, f := range files {
+		next := publicURLOrigin(f.publicURL) + canonicalFilePath(f.id, f.name)
+		if next == f.publicURL {
+			continue
+		}
+		if _, err := conn.Exec(`UPDATE files SET public_url=? WHERE id=?`, next, f.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func canonicalFilePath(id, name string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
+	if ext == "" || len(ext) > 12 || strings.ContainsAny(ext, `/\`) {
+		return "/files/" + id
+	}
+	return "/files/" + id + ext
+}
+
+func publicURLOrigin(value string) string {
+	u, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS upload_batches (
   id TEXT PRIMARY KEY,
@@ -71,6 +169,7 @@ CREATE TABLE IF NOT EXISTS files (
   image_height INTEGER,
   storage_provider TEXT NOT NULL,
   storage_file_id TEXT NOT NULL,
+  thumbnail_file_id TEXT,
   storage_url TEXT,
   public_url TEXT NOT NULL,
   is_public INTEGER NOT NULL DEFAULT 1,
