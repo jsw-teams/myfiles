@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev --host 127.0.0.1 --port 4322",
-    "sync:cookies": "node /opt/mycookies/scripts/sync-to-projects.mjs",
+    "sync:cookies": "node /opt/privacy-js-gripe/scripts/sync-to-projects.mjs",
     "build": "astro build && node scripts/seo-postbuild.mjs",
     "preview": "astro preview --host 127.0.0.1 --port 4322"
   },

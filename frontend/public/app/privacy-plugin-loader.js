@@ -1,12 +1,13 @@
 (() => {
   const currentScript = document.currentScript;
   const scriptBaseUrl = currentScript?.src ? new URL(".", currentScript.src) : new URL("/", window.location.href);
-  const configUrl = currentScript?.dataset.config || new URL("privacy-plugins.json?v=20260524v2", scriptBaseUrl).href;
-  const stylesheetUrl = currentScript?.dataset.stylesheet || new URL("privacy-plugin-banner.css?v=20260524v2", scriptBaseUrl).href;
+  const configUrl = currentScript?.dataset.config || new URL("privacy-plugins.json?v=20260524v3", scriptBaseUrl).href;
+  const stylesheetUrl = currentScript?.dataset.stylesheet || new URL("privacy-plugin-banner.css?v=20260524v3", scriptBaseUrl).href;
   const storageKey = "privacy_plugins_consent_v4";
   const legacyStorageKeys = ["privacy_plugins_consent_v3"];
   const regionKey = "privacy_plugins_region_v1";
   const globalStateKey = "__jsGripePrivacyPlugins";
+  const cookieMaxAge = 60 * 60 * 24 * 180;
   const consentRegionCodes = new Set([
     "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
     "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
@@ -30,6 +31,7 @@
       close: "关闭",
       preferences: "隐私偏好中心",
       settings: "隐私设置",
+      language: "语言",
       required: "必要",
       optional: "可选",
       requiredServicesTitle: "必要项目",
@@ -57,6 +59,7 @@
       close: "關閉",
       preferences: "隱私偏好中心",
       settings: "隱私設定",
+      language: "語言",
       required: "必要",
       optional: "可選",
       requiredServicesTitle: "必要項目",
@@ -84,6 +87,7 @@
       close: "Close",
       preferences: "Privacy Preference Center",
       settings: "Privacy settings",
+      language: "Language",
       required: "Required",
       optional: "Optional",
       requiredServicesTitle: "Required services",
@@ -103,13 +107,16 @@
 .privacy-plugin-banner *,.privacy-plugin-overlay *,.privacy-plugin-settings *{box-sizing:border-box}
 .privacy-plugin-banner{position:fixed;right:16px;bottom:var(--privacy-plugin-banner-bottom,16px);left:16px;z-index:2147483000;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;max-width:980px;margin:0 auto;padding:16px;border:1px solid rgba(15,23,42,.18);border-radius:8px;background:#fff;box-shadow:0 18px 44px rgba(15,23,42,.18)}
 .privacy-plugin-banner-content{display:grid;gap:6px}.privacy-plugin-banner strong,.privacy-plugin-title{margin:0;font-size:16px;font-weight:750;line-height:1.25}.privacy-plugin-banner p,.privacy-plugin-banner small,.privacy-plugin-lede,.privacy-plugin-notice{margin:0}.privacy-plugin-banner small,.privacy-plugin-notice,.privacy-plugin-category small{color:#4b5563;font-size:12px}
+.privacy-plugin-banner-head,.privacy-plugin-panel-head{display:flex;gap:12px;align-items:center;justify-content:space-between}
+.privacy-plugin-language{display:inline-flex;gap:0;border:1px solid rgba(15,23,42,.24);border-radius:6px;overflow:hidden;background:#fff}
+.privacy-plugin-language button{min-height:30px;border:0;border-radius:0;padding:0 10px;background:#fff;color:#172033;font:700 12px/1 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}.privacy-plugin-language button[aria-pressed=true]{background:#172033;color:#fff}.privacy-plugin-language button:focus-visible{outline:3px solid #93c5fd;outline-offset:2px}
 .privacy-plugin-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.privacy-plugin-actions button,.privacy-plugin-settings,.privacy-plugin-panel>button[data-privacy-action=close]{min-height:40px;border:1px solid #172033;border-radius:6px;padding:0 14px;background:#fff;color:#172033;font:700 14px/1 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}.privacy-plugin-actions button[data-variant=primary]{background:#172033;color:#fff}
 .privacy-plugin-actions button:disabled{cursor:not-allowed;opacity:.55}.privacy-plugin-actions button:focus-visible,.privacy-plugin-settings:focus-visible,.privacy-plugin-panel>button[data-privacy-action=close]:focus-visible,.privacy-plugin-category:focus-within{outline:3px solid #93c5fd;outline-offset:2px}
 .privacy-plugin-overlay{position:fixed;inset:0;z-index:2147483001;display:grid;place-items:center;padding:18px;background:rgba(15,23,42,.46)}.privacy-plugin-panel{display:grid;gap:14px;width:min(760px,100%);max-height:min(720px,calc(100vh - 36px));overflow:auto;padding:20px;border-radius:8px;background:#fff;box-shadow:0 24px 70px rgba(15,23,42,.32)}
 .privacy-plugin-categories{display:grid;gap:10px}.privacy-plugin-category{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start;padding:14px;border:1px solid rgba(15,23,42,.14);border-radius:8px;cursor:pointer}.privacy-plugin-category input{width:20px;height:20px;margin:2px 0 0;accent-color:#172033}.privacy-plugin-category span{display:grid;gap:4px}.privacy-plugin-category strong{font-size:15px}.privacy-plugin-category em{color:#4b5563;font-style:normal;font-weight:700}
 .privacy-plugin-sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .privacy-plugin-settings{position:fixed;right:16px;bottom:var(--privacy-plugin-settings-bottom,var(--privacy-plugin-banner-bottom,16px));z-index:2147482999;min-height:36px;background:#fff;box-shadow:0 12px 30px rgba(15,23,42,.16)}.privacy-plugin-panel>button[data-privacy-action=close]{justify-self:start;border-color:transparent;padding-inline:0;color:#4b5563}
-@media (max-width:720px){.privacy-plugin-banner{grid-template-columns:1fr}.privacy-plugin-actions{justify-content:stretch}.privacy-plugin-actions button{flex:1 1 120px}.privacy-plugin-category{grid-template-columns:auto minmax(0,1fr)}.privacy-plugin-category em{grid-column:2}}
+@media (max-width:720px){.privacy-plugin-banner{grid-template-columns:1fr}.privacy-plugin-actions{justify-content:stretch}.privacy-plugin-actions button{flex:1 1 120px}.privacy-plugin-banner-head,.privacy-plugin-panel-head{align-items:flex-start;flex-direction:column}.privacy-plugin-category{grid-template-columns:auto minmax(0,1fr)}.privacy-plugin-category em{grid-column:2}}
 `;
 
   const normalizeCountry = (value) => String(value || "").trim().toUpperCase();
@@ -137,20 +144,83 @@
     const languages = navigator.languages?.length ? navigator.languages : [navigator.language || "en"];
     return normalizeLang(languages[0]) || "en";
   };
-  const readJson = (key) => {
+  let activeLang = browserLang();
+
+  function cookieAttributes(maxAge = cookieMaxAge) {
+    const secure = window.location.protocol === "https:" ? "; secure" : "";
+    return `; path=/; max-age=${maxAge}; samesite=lax${secure}`;
+  }
+
+  function readCookie(name) {
+    const encodedName = `${encodeURIComponent(name)}=`;
+    const match = document.cookie
+      .split(";")
+      .map((item) => item.trim())
+      .find((item) => item.startsWith(encodedName));
+    if (!match) return "";
+    try {
+      return decodeURIComponent(match.slice(encodedName.length));
+    } catch {
+      return "";
+    }
+  }
+
+  function writeCookie(name, value) {
+    document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}${cookieAttributes()}`;
+  }
+
+  function deleteCookie(name) {
+    document.cookie = `${encodeURIComponent(name)}=${cookieAttributes(0)}`;
+  }
+
+  function readLocalJson(key) {
     try {
       return JSON.parse(localStorage.getItem(key) || "null");
     } catch {
       return null;
     }
-  };
-  const writeJson = (key, value) => {
+  }
+
+  function removeLocalJson(key) {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      localStorage.removeItem(key);
     } catch {
       /* Ignore private-mode storage errors. */
     }
-  };
+  }
+
+  function readJson(key) {
+    const cookieValue = readCookie(key);
+    if (cookieValue) {
+      try {
+        return JSON.parse(cookieValue);
+      } catch {
+        deleteCookie(key);
+        return null;
+      }
+    }
+
+    const legacyValue = readLocalJson(key);
+    if (legacyValue) {
+      writeJson(key, legacyValue);
+      removeLocalJson(key);
+    }
+    return legacyValue;
+  }
+
+  function writeJson(key, value) {
+    try {
+      writeCookie(key, JSON.stringify(value));
+    } catch {
+      /* Ignore cookie serialization errors. */
+    }
+    removeLocalJson(key);
+  }
+
+  function removeJson(key) {
+    deleteCookie(key);
+    removeLocalJson(key);
+  }
 
   function hasGlobalOptOut() {
     return navigator.globalPrivacyControl === true || navigator.doNotTrack === "1" || window.doNotTrack === "1";
@@ -260,14 +330,40 @@
     return node;
   }
 
+  function languageSwitcher(config, onChange) {
+    const copy = copyFor(config);
+    const switcher = document.createElement("div");
+    switcher.className = "privacy-plugin-language";
+    switcher.setAttribute("role", "group");
+    switcher.setAttribute("aria-label", copy.language || "Language");
+    [
+      ["zh-CN", "简"],
+      ["zh-TW", "繁"],
+      ["en", "EN"]
+    ].forEach(([lang, label]) => {
+      const node = document.createElement("button");
+      node.type = "button";
+      node.textContent = label;
+      node.setAttribute("aria-pressed", String((activeLang || browserLang()) === lang));
+      node.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        activeLang = lang;
+        onChange();
+      });
+      switcher.append(node);
+    });
+    return switcher;
+  }
+
   function copyFor(config) {
-    const lang = browserLang();
+    const lang = activeLang || browserLang();
     return config.ui?.[lang] || config.ui?.en || fallbackCopy[lang] || fallbackCopy.en;
   }
 
   function localizedValue(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-    const lang = browserLang();
+    const lang = activeLang || browserLang();
     return value[lang] || value.en || value["zh-CN"] || Object.values(value).find(Boolean) || "";
   }
 
@@ -287,13 +383,7 @@
       version: 4
     };
     writeJson(storageKey, value);
-    legacyStorageKeys.forEach((key) => {
-      try {
-        localStorage.removeItem(key);
-      } catch {
-        /* Ignore private-mode storage errors. */
-      }
-    });
+    legacyStorageKeys.forEach(removeJson);
     return value;
   }
 
@@ -379,9 +469,15 @@
 
     const panel = document.createElement("div");
     panel.className = "privacy-plugin-panel";
+    const header = document.createElement("div");
+    header.className = "privacy-plugin-panel-head";
     const title = text("h2", copy.preferences, "privacy-plugin-title");
     title.id = titleId;
-    panel.append(title);
+    header.append(title, languageSwitcher(config, () => {
+      overlay.remove();
+      showPreferenceCenter(config, context);
+    }));
+    panel.append(header);
     const lede = text("p", context.globalOptOut ? copy.gpc : copy.bannerMessage, "privacy-plugin-lede");
     lede.id = descriptionId;
     panel.append(lede);
@@ -393,21 +489,20 @@
     list.className = "privacy-plugin-categories";
     const requiredServices = requiredServicesFor(config);
     if (requiredServices.length) {
-      const item = document.createElement("label");
-      item.className = "privacy-plugin-category";
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.checked = true;
-      input.disabled = true;
-      input.setAttribute("aria-label", copy.requiredServicesTitle || copy.required);
-      const body = document.createElement("span");
-      body.append(text("strong", copy.requiredServicesTitle || copy.required));
-      body.append(text("span", copy.requiredServicesDescription || ""));
       requiredServices.forEach((service) => {
-        body.append(text("small", localizedValue(service.disclosure) || service.name || service.id));
+        const item = document.createElement("label");
+        item.className = "privacy-plugin-category";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = true;
+        input.disabled = true;
+        input.setAttribute("aria-label", service.name || service.id || copy.required);
+        const body = document.createElement("span");
+        body.append(text("strong", service.name || service.id || copy.requiredServicesTitle || copy.required));
+        body.append(text("span", localizedValue(service.disclosure) || copy.requiredServicesDescription || ""));
+        item.append(input, body, text("em", copy.required));
+        list.append(item);
       });
-      item.append(input, body, text("em", copy.required));
-      list.append(item);
     }
     categories.forEach((category) => {
       const categoryPlugins = context.gatedPlugins.filter((plugin) => categoryOf(plugin) === category);
@@ -425,7 +520,7 @@
       body.append(text("strong", categoryInfo.title));
       body.append(text("span", categoryInfo.description));
       categoryPlugins.forEach((plugin) => {
-        body.append(text("small", plugin.disclosure || plugin.name || plugin.id));
+        body.append(text("small", localizedValue(plugin.disclosure) || plugin.name || plugin.id));
       });
       item.append(input, body, text("em", copy.optional));
       list.append(item);
@@ -502,9 +597,15 @@
 
     const content = document.createElement("div");
     content.className = "privacy-plugin-banner-content";
+    const head = document.createElement("div");
+    head.className = "privacy-plugin-banner-head";
     const title = text("strong", copy.bannerTitle);
     title.id = "privacy-plugin-banner-title";
-    content.append(title);
+    head.append(title, languageSwitcher(config, () => {
+      banner.remove();
+      showBanner(config, context);
+    }));
+    content.append(head);
     const description = text("p", context.globalOptOut ? copy.gpc : copy.bannerMessage);
     description.id = "privacy-plugin-banner-description";
     content.append(description);
@@ -560,13 +661,7 @@
     window.JSGripePrivacy = {
       openPreferences: () => showPreferenceCenter(config, context),
       reset: () => {
-        [storageKey, ...legacyStorageKeys].forEach((key) => {
-          try {
-            localStorage.removeItem(key);
-          } catch {
-            /* Ignore private-mode storage errors. */
-          }
-        });
+        [storageKey, ...legacyStorageKeys].forEach(removeJson);
         document.querySelectorAll("[data-privacy-root],[data-privacy-settings]").forEach((node) => node.remove());
         showBanner(config, context);
       }

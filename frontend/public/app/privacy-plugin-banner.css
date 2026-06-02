@@ -58,6 +58,44 @@
   font-size: 12px;
 }
 
+.privacy-plugin-banner-head,
+.privacy-plugin-panel-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.privacy-plugin-language {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid rgba(15, 23, 42, 0.24);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.privacy-plugin-language button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 0;
+  padding: 0 10px;
+  background: #fff;
+  color: #172033;
+  font: 700 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+.privacy-plugin-language button[aria-pressed="true"] {
+  background: #172033;
+  color: #fff;
+}
+
+.privacy-plugin-language button:focus-visible {
+  outline: 3px solid #93c5fd;
+  outline-offset: 2px;
+}
+
 .privacy-plugin-actions {
   display: flex;
   gap: 8px;
@@ -196,6 +234,12 @@
 
   .privacy-plugin-actions button {
     flex: 1 1 120px;
+  }
+
+  .privacy-plugin-banner-head,
+  .privacy-plugin-panel-head {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .privacy-plugin-category {

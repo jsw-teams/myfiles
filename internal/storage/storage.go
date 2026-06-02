@@ -162,6 +162,18 @@ func (u *TGBotsUploader) Upload(ctx context.Context, in UploadInput) (UploadResu
 					FileID string `json:"file_id"`
 				} `json:"thumbnail"`
 			} `json:"video"`
+			Audio *struct {
+				FileID string `json:"file_id"`
+			} `json:"audio"`
+			Voice *struct {
+				FileID string `json:"file_id"`
+			} `json:"voice"`
+			Animation *struct {
+				FileID    string `json:"file_id"`
+				Thumbnail *struct {
+					FileID string `json:"file_id"`
+				} `json:"thumbnail"`
+			} `json:"animation"`
 			Photo []struct {
 				FileID   string `json:"file_id"`
 				FileSize int64  `json:"file_size"`
@@ -190,6 +202,18 @@ func (u *TGBotsUploader) Upload(ctx context.Context, in UploadInput) (UploadResu
 			thumbID = payload.Result.Video.Thumbnail.FileID
 		}
 	}
+	if payload.Result.Audio != nil {
+		fileID = payload.Result.Audio.FileID
+	}
+	if payload.Result.Voice != nil {
+		fileID = payload.Result.Voice.FileID
+	}
+	if payload.Result.Animation != nil {
+		fileID = payload.Result.Animation.FileID
+		if payload.Result.Animation.Thumbnail != nil {
+			thumbID = payload.Result.Animation.Thumbnail.FileID
+		}
+	}
 	if len(payload.Result.Photo) > 0 {
 		best := payload.Result.Photo[0]
 		for _, p := range payload.Result.Photo[1:] {
@@ -212,15 +236,7 @@ type telegramMedia struct {
 }
 
 func telegramUploadMedia(in UploadInput) telegramMedia {
-	mimeType := strings.ToLower(strings.TrimSpace(in.MIME))
-	switch {
-	case mimeType == "video/mp4" || mimeType == "video/quicktime":
-		return telegramMedia{Method: "sendVideo", Field: "video"}
-	case mimeType == "image/jpeg" || mimeType == "image/png":
-		return telegramMedia{Method: "sendPhoto", Field: "photo"}
-	default:
-		return telegramMedia{Method: "sendDocument", Field: "document"}
-	}
+	return telegramMedia{Method: "sendDocument", Field: "document"}
 }
 
 func streamMultipartTelegramFile(writer *multipart.Writer, in UploadInput, chatID string, media telegramMedia) error {
