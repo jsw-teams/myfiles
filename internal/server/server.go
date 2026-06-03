@@ -975,7 +975,7 @@ func shouldPreferExtensionMIME(detected, extMIME string) bool {
 	if detected == "application/octet-stream" {
 		return true
 	}
-	if detected == "text/plain; charset=utf-8" && (isSubtitleMIME(extMIME) || strings.HasPrefix(extMIME, "audio/")) {
+	if detected == "text/plain; charset=utf-8" && (isSubtitleMIME(extMIME) || strings.HasPrefix(extMIME, "audio/") || extMIME == "image/svg+xml") {
 		return true
 	}
 	return (strings.HasPrefix(extMIME, "video/") || strings.HasPrefix(extMIME, "audio/")) && !strings.HasPrefix(detected, strings.Split(extMIME, "/")[0]+"/")
