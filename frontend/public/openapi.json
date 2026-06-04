@@ -1,0 +1,110 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Files.js.gripe API",
+    "version": "1.0.0",
+    "description": "Protected file upload, sharing, and administration API. Uploaded files and file metadata are not suitable for crawling or AI training."
+  },
+  "servers": [
+    {
+      "url": "https://files.js.gripe"
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Service health"
+          }
+        }
+      }
+    },
+    "/api/bootstrap": {
+      "get": {
+        "summary": "Get public UI bootstrap policy",
+        "responses": {
+          "200": {
+            "description": "Upload limits and account login paths"
+          }
+        }
+      }
+    },
+    "/auth/account/start": {
+      "get": {
+        "summary": "Start Account.js.gripe sign-in",
+        "responses": {
+          "302": {
+            "description": "Redirect to Account.js.gripe"
+          }
+        }
+      }
+    },
+    "/api/account/me": {
+      "get": {
+        "summary": "Get current file-service account session",
+        "responses": {
+          "200": {
+            "description": "Current user and myfiles permissions"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/upload": {
+      "post": {
+        "summary": "Upload files subject to policy",
+        "responses": {
+          "200": {
+            "description": "Upload batch result"
+          },
+          "401": {
+            "description": "Authentication required when anonymous uploads are disabled"
+          },
+          "413": {
+            "description": "Upload too large"
+          }
+        }
+      }
+    },
+    "/api/files": {
+      "get": {
+        "summary": "List files owned by the current user",
+        "responses": {
+          "200": {
+            "description": "File list"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/file/{id}/info": {
+      "get": {
+        "summary": "Get metadata for an explicitly public file link",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public file metadata"
+          },
+          "404": {
+            "description": "File not public or not found"
+          }
+        }
+      }
+    }
+  }
+}

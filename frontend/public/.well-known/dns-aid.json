@@ -1,0 +1,18 @@
+{
+  "domain": "files.js.gripe",
+  "records": [
+    {
+      "owner": "_index._agents.files.js.gripe.",
+      "type": "HTTPS",
+      "ttl": 300,
+      "value": "1 files.js.gripe. alpn=\"h2\" port=443"
+    },
+    {
+      "owner": "_mcp._agents.files.js.gripe.",
+      "type": "HTTPS",
+      "ttl": 300,
+      "value": "1 files.js.gripe. alpn=\"h2\" port=443"
+    }
+  ],
+  "dnssec": "Publish these records in the js.gripe DNS zone and keep DNSSEC enabled."
+}

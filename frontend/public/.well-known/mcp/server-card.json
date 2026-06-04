@@ -1,0 +1,23 @@
+{
+  "serverInfo": {
+    "name": "Files.js.gripe Discovery",
+    "version": "1.0.0"
+  },
+  "transport": {
+    "type": "webmcp",
+    "endpoint": "https://files.js.gripe/"
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "list_discovery_resources",
+        "description": "List public discovery resources for Files.js.gripe without accessing uploaded files."
+      },
+      {
+        "name": "describe_file_service_policy",
+        "description": "Describe Files.js.gripe crawler, AI-use, and authentication boundaries."
+      }
+    ],
+    "resources": []
+  }
+}

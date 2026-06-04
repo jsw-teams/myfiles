@@ -76,6 +76,9 @@ func (a *App) securityHeaders(next http.Handler) http.Handler {
 		p := r.URL.Path
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Content-Signal", "ai-train=no, search=no, ai-input=no")
+		w.Header().Set("Link", `</.well-known/api-catalog>; rel="api-catalog", </auth.md>; rel="service-doc", </.well-known/oauth-protected-resource>; rel="oauth-protected-resource", </.well-known/mcp/server-card.json>; rel="mcp-server-card", </.well-known/agent-skills/index.json>; rel="agent-skills"`)
+		w.Header().Set("Permissions-Policy", "browsing-topics=(), join-ad-interest-group=(), run-ad-auction=(), tools=(self)")
 		if strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/admin") || strings.HasPrefix(p, "/dashboard") || strings.HasPrefix(p, "/setup") {
 			w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		}
@@ -3251,7 +3254,19 @@ func (a *App) serveFrontend(w http.ResponseWriter, r *http.Request) {
 
 func setFrontendCacheHeaders(w http.ResponseWriter, urlPath, diskPath string) {
 	ext := strings.ToLower(filepath.Ext(diskPath))
-	if ext == ".html" {
+	switch {
+	case urlPath == "/.well-known/api-catalog":
+		w.Header().Set("Content-Type", "application/linkset+json; charset=utf-8")
+	case strings.HasPrefix(urlPath, "/.well-known/") && ext == "":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	case ext == ".md":
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	case ext == ".xml":
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	case ext == ".txt":
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	if ext == ".html" || strings.HasPrefix(urlPath, "/app/") {
 		w.Header().Set("Cache-Control", "no-store")
 		return
 	}

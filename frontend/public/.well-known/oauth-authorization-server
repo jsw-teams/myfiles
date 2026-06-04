@@ -1,0 +1,47 @@
+{
+  "issuer": "https://account.js.gripe/",
+  "authorization_endpoint": "https://account.js.gripe/login",
+  "token_endpoint": "https://gateway.js.gripe/api/v1/myaccount/auth/login",
+  "registration_endpoint": "https://account.js.gripe/dashboard",
+  "jwks_uri": "https://account.js.gripe/.well-known/jwks.json",
+  "scopes_supported": [
+    "accounts:read",
+    "identities:resolve",
+    "identities:link"
+  ],
+  "response_types_supported": [
+    "code"
+  ],
+  "grant_types_supported": [
+    "authorization_code"
+  ],
+  "token_endpoint_auth_methods_supported": [
+    "client_secret_post",
+    "client_secret_basic"
+  ],
+  "service_documentation": "https://files.js.gripe/auth.md",
+  "protected_resources": [
+    "https://files.js.gripe/"
+  ],
+  "agent_auth": {
+    "skill": "https://workos.com/auth.md",
+    "register_uri": "https://files.js.gripe/auth.md#standalone-registration-flow",
+    "claim_uri": "https://files.js.gripe/auth.md#claims",
+    "revocation_uri": "https://files.js.gripe/auth.md#revocation",
+    "identity_types_supported": [
+      "user",
+      "anonymous"
+    ],
+    "user": {
+      "credential_types_supported": [
+        "browser_session"
+      ]
+    },
+    "anonymous": {
+      "credential_types_supported": [
+        "none"
+      ]
+    },
+    "events_supported": []
+  }
+}

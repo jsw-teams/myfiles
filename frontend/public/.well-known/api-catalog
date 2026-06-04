@@ -1,0 +1,25 @@
+{
+  "linkset": [
+    {
+      "anchor": "https://files.js.gripe/api/",
+      "service-desc": [
+        {
+          "href": "https://files.js.gripe/openapi.json",
+          "type": "application/openapi+json"
+        }
+      ],
+      "service-doc": [
+        {
+          "href": "https://files.js.gripe/auth.md",
+          "type": "text/markdown"
+        }
+      ],
+      "status": [
+        {
+          "href": "https://files.js.gripe/healthz",
+          "type": "application/json"
+        }
+      ]
+    }
+  ]
+}

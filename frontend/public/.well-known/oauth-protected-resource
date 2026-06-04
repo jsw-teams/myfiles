@@ -1,0 +1,16 @@
+{
+  "resource": "https://files.js.gripe/",
+  "authorization_servers": [
+    "https://account.js.gripe/"
+  ],
+  "scopes_supported": [
+    "accounts:read",
+    "identities:resolve",
+    "identities:link"
+  ],
+  "bearer_methods_supported": [
+    "header"
+  ],
+  "resource_name": "Files.js.gripe File Service",
+  "resource_documentation": "https://files.js.gripe/auth.md"
+}

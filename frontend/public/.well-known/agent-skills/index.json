@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agentskills.io/schemas/agent-skills-index-v0.2.0.json",
+  "skills": [
+    {
+      "name": "file-service-policy",
+      "type": "documentation",
+      "description": "Understand Files.js.gripe crawling, AI-use, and authentication boundaries.",
+      "url": "https://files.js.gripe/.well-known/agent-skills/file-service-policy.md",
+      "sha256": "0fb7a6e9bd2b67bb5aafa18421bf6e9152ae6a8ea8bc9a15ecafcd4451c65df3"
+    },
+    {
+      "name": "discovery-resources",
+      "type": "documentation",
+      "description": "List the public Files.js.gripe discovery resources allowed for agents.",
+      "url": "https://files.js.gripe/.well-known/agent-skills/discovery-resources.md",
+      "sha256": "3291f960d6c02ba240b271c6e1441c933d8ec9e42dc971fd96385b6f200e522f"
+    }
+  ]
+}
