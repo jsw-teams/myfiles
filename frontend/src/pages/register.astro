@@ -1,0 +1,115 @@
+---
+import Base from "../layouts/Base.astro";
+---
+<Base titleKey="register" noindex={true}>
+  <main id="main-content" class="login-page pixel-auth">
+    <section class="login-card">
+      <div class="login-art">
+        <img src="/assets/myfiles-auth-v2.png" alt="" />
+        <div class="bear-bubble">
+          <div class="pixel-kicker" data-register-kicker>LOCAL ACCOUNT</div>
+          <h1 data-brand>myfiles</h1>
+          <p data-register-copy>创建一个本地账户，用于上传、管理和取件。</p>
+        </div>
+      </div>
+      <div class="login-form-panel">
+        <h2 data-register-title>注册</h2>
+        <p class="muted" data-register-desc>是否开放注册由系统管理员在控制台统一控制。</p>
+        <form id="register-form" class="grid" autocomplete="on">
+          <label class="field-block">
+            <span data-register-email>邮箱</span>
+            <input class="input" name="email" type="email" autocomplete="username" required />
+          </label>
+          <label class="field-block">
+            <span data-register-name>显示名</span>
+            <input class="input" name="displayName" type="text" autocomplete="name" required />
+          </label>
+          <label class="field-block">
+            <span data-register-password>密码</span>
+            <input class="input" name="password" type="password" autocomplete="new-password" minlength="10" required />
+          </label>
+          <button class="pixel-button" type="submit" data-register-submit>注册并进入控制台</button>
+        </form>
+        <div class="auth-actions">
+          <a class="pixel-button secondary compact" href="/login" data-register-login>返回登录</a>
+        </div>
+        <div id="alert" class="pixel-alert" role="alert" style="display:none"></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const lang = (navigator.language || "zh-CN").toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+    const labels = {
+      "zh-CN": {
+        copy: "创建一个本地账户，用于上传、管理和取件。",
+        title: "注册",
+        desc: "是否开放注册由系统管理员在控制台统一控制。",
+        email: "邮箱",
+        name: "显示名",
+        password: "密码",
+        submit: "注册并进入控制台",
+        login: "返回登录",
+        disabled: "当前站点未开放自主注册，正在返回登录页。",
+        setup: "系统尚未初始化，正在前往初始化页面。",
+        failed: "注册失败，请检查输入后重试。"
+      },
+      en: {
+        copy: "Create a local account for uploads, management, and pickup.",
+        title: "Create account",
+        desc: "Registration is controlled by the system administrator.",
+        email: "Email",
+        name: "Display name",
+        password: "Password",
+        submit: "Create account",
+        login: "Back to sign in",
+        disabled: "Self-registration is disabled. Returning to sign-in.",
+        setup: "Setup is required. Redirecting.",
+        failed: "Registration failed. Check the form and try again."
+      }
+    }[lang];
+    const set = (selector, text) => { const node = document.querySelector(selector); if (node) node.textContent = text; };
+    set("[data-register-copy]", labels.copy);
+    set("[data-register-title]", labels.title);
+    set("[data-register-desc]", labels.desc);
+    set("[data-register-email]", labels.email);
+    set("[data-register-name]", labels.name);
+    set("[data-register-password]", labels.password);
+    set("[data-register-submit]", labels.submit);
+    set("[data-register-login]", labels.login);
+    const form = document.querySelector("#register-form");
+    const alertBox = document.querySelector("#alert");
+    const show = (message) => { alertBox.textContent = message; alertBox.style.display = "block"; };
+    fetch("/api/auth/options?_v=20260616accounts3", { cache: "no-store" })
+      .then((res) => res.ok ? res.json() : null)
+      .then((json) => {
+        if (json?.initialized === false) {
+          show(labels.setup);
+          setTimeout(() => location.replace("/setup"), 500);
+          return;
+        }
+        if (!json?.allowRegistration) {
+          show(labels.disabled);
+          setTimeout(() => location.replace("/login"), 900);
+        }
+      })
+      .catch(() => {});
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      alertBox.style.display = "none";
+      const body = Object.fromEntries(new FormData(form).entries());
+      try {
+        const res = await fetch("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify(body)
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || json.ok === false) throw new Error(json.error || labels.failed);
+        location.href = "/dashboard";
+      } catch (error) {
+        show(error.message || labels.failed);
+      }
+    });
+  </script>
+</Base>

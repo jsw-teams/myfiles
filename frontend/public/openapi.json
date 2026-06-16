@@ -3,7 +3,7 @@
   "info": {
     "title": "Files.js.gripe API",
     "version": "1.0.0",
-    "description": "Protected file upload, sharing, and administration API. Uploaded files and file metadata are not suitable for crawling or AI training."
+    "description": "Protected file upload, sharing, and administration API. Public /files links may be fetched directly; protected APIs, dashboards, upload results, setup, and admin pages are not crawl targets."
   },
   "servers": [
     {

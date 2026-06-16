@@ -1,0 +1,111 @@
+---
+import Base from "../layouts/Base.astro";
+---
+<Base titleKey="setup" noindex={true}>
+  <main id="main-content" class="login-page pixel-auth setup-page">
+    <section class="login-card setup-card">
+      <div class="login-art">
+        <img src="/assets/myfiles-auth-v2.png" alt="" />
+        <div class="bear-bubble">
+          <div class="pixel-kicker" data-setup-kicker>SETUP</div>
+          <h1>myfiles</h1>
+          <p data-setup-copy>创建本地系统管理员后即可独立管理文件服务。</p>
+        </div>
+      </div>
+      <div class="login-form-panel">
+        <h2 data-setup-title>初始化</h2>
+        <p class="muted" data-setup-desc>首个账户会成为 system_admin。初始化完成后可使用本地账号登录，SSO 只是可选绑定。</p>
+        <form id="setup-form" class="grid" autocomplete="off">
+          <label class="field-block">
+            <span data-setup-email>管理员邮箱</span>
+            <input class="input" name="email" type="email" autocomplete="username" required />
+          </label>
+          <label class="field-block">
+            <span data-setup-name>显示名</span>
+            <input class="input" name="displayName" type="text" autocomplete="name" required />
+          </label>
+          <label class="field-block">
+            <span data-setup-password>密码</span>
+            <input class="input" name="password" type="password" autocomplete="new-password" minlength="10" required />
+          </label>
+          <button class="pixel-button" type="submit" data-setup-submit>创建管理员</button>
+        </form>
+        <div id="setup-alert" class="pixel-alert" role="alert" style="display:none"></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const lang = (navigator.language || "zh-CN").toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+    const t = {
+      "zh-CN": {
+        copy: "创建本地系统管理员后即可独立管理文件服务。",
+        title: "初始化",
+        desc: "首个账户会成为 system_admin。初始化完成后可使用本地账号登录，SSO 只是可选绑定。",
+        email: "管理员邮箱",
+        name: "显示名",
+        password: "密码",
+        submit: "创建管理员",
+        ready: "系统已初始化，正在前往登录页。",
+        unavailable: "初始化接口暂不可用，请确认后端账户系统已部署。",
+        failed: "初始化失败，请检查输入后重试。"
+      },
+      en: {
+        copy: "Create a local system administrator to manage this file service independently.",
+        title: "Setup",
+        desc: "The first account becomes system_admin. Local login works independently; SSO is optional.",
+        email: "Admin email",
+        name: "Display name",
+        password: "Password",
+        submit: "Create admin",
+        ready: "Setup is complete. Redirecting to sign-in.",
+        unavailable: "The setup API is not available yet. Confirm the local account backend is deployed.",
+        failed: "Setup failed. Check the form and try again."
+      }
+    }[lang];
+    document.querySelector("[data-setup-copy]").textContent = t.copy;
+    document.querySelector("[data-setup-title]").textContent = t.title;
+    document.querySelector("[data-setup-desc]").textContent = t.desc;
+    document.querySelector("[data-setup-email]").textContent = t.email;
+    document.querySelector("[data-setup-name]").textContent = t.name;
+    document.querySelector("[data-setup-password]").textContent = t.password;
+    document.querySelector("[data-setup-submit]").textContent = t.submit;
+
+    const form = document.querySelector("#setup-form");
+    const alertBox = document.querySelector("#setup-alert");
+    const show = (message, ok = false) => {
+      alertBox.textContent = message;
+      alertBox.className = ok ? "pixel-alert ok" : "pixel-alert";
+      alertBox.style.display = "block";
+    };
+
+    fetch("/api/setup/status", { cache: "no-store" })
+      .then((res) => res.ok ? res.json() : null)
+      .then((json) => {
+        if (json?.initialized) {
+          show(t.ready, true);
+          setTimeout(() => location.replace("/login"), 800);
+        }
+      })
+      .catch(() => {});
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      alertBox.style.display = "none";
+      const body = Object.fromEntries(new FormData(form).entries());
+      try {
+        const res = await fetch("/api/setup/init", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify(body)
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || json.ok === false) throw new Error(json.error || t.failed);
+        show(t.ready, true);
+        setTimeout(() => location.replace("/login"), 800);
+      } catch (error) {
+        show(error.message || t.unavailable);
+      }
+    });
+  </script>
+</Base>

@@ -98,10 +98,13 @@ Common fields:
 - `account.client_id`: unified account client id.
 - `account.client_secret`: unified account secret.
 - `account.redirect_uri`: login callback URL.
-- `storage.mode`: `local`, `tgbots`, or `disabled`.
-- `storage.upload_url`: upload endpoint for `tgbots` mode.
-- `storage.api_key`: storage API key or bot token.
-- `storage.chat_id`: storage chat/group id.
+- `storage.mode`: `r2`, `local`, or `disabled`.
+- `storage.r2_endpoint`: Cloudflare R2 S3 API endpoint, usually ending with the bucket name.
+- `storage.r2_bucket`: R2 bucket name.
+- `storage.r2_access_key_id`: R2 S3 access key id.
+- `storage.r2_secret_access_key`: R2 S3 secret access key.
+- `storage.r2_region`: R2 signing region, normally `auto`.
+- `storage.r2_prefix`: optional object key prefix.
 - `file.default_region_policy`: `global`, `allow:<codes>`, or `deny:<codes>`.
 - `file.default_hotlink_policy`: `allow` or `deny`.
 - `security.session_ttl_hours`: browser session duration.

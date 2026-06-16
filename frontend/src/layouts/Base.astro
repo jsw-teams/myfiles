@@ -17,6 +17,7 @@ const { titleKey = "home", noindex = false } = Astro.props;
     <meta property="og:description" content="上传文件并通过 24 小时取件码进行临时分享。" />
     <meta property="og:type" content="website" />
     <link rel="canonical" href="/" />
+    <link rel="shortcut icon" type="image/png" href="/assets/favicon-32.png" />
     <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="/assets/site-icon-512.png" />
     <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
@@ -24,8 +25,8 @@ const { titleKey = "home", noindex = false } = Astro.props;
   <body data-title-key={titleKey}>
     <a class="skip-link" href="#main-content" data-i18n="skipContent">跳到主内容</a>
     <slot />
-    <script type="module" src="/app/shell-nav.js?v=20260529a"></script>
-    <script type="module" src="/app/site-i18n.js?v=20260529a"></script>
+    <script type="module" src="/app/shell-nav.js?v=20260616accounts3"></script>
+    <script type="module" src="/app/site-i18n.js?v=20260616accounts3"></script>
     <script>
       (() => {
         const lang = (navigator.language || "zh-CN").toLowerCase().startsWith("zh") ? "zh-CN" : "en";
@@ -40,7 +41,6 @@ const { titleKey = "home", noindex = false } = Astro.props;
         });
       })();
     </script>
-    <script src="https://privacy.js.gripe/privacy-plugin-loader.js?v=20260524v3" data-config="/app/privacy-plugins.json?v=20260524v3" defer></script>
-    <script src="/assets/agent-discovery.js?v=20260604" defer></script>
+    <script src="/assets/agent-discovery.js?v=20260616accounts3" defer></script>
   </body>
 </html>

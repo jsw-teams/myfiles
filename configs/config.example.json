@@ -19,13 +19,17 @@
     "scopes": ["accounts:read", "identities:resolve"]
   },
   "storage": {
-    "mode": "tgbots",
-    "upload_url": "https://gateway.js.gripe/api/v1/tgbots",
+    "mode": "r2",
     "public_base_url": "https://files.js.gripe",
-    "api_key": "",
-    "chat_id": "",
     "timeout_seconds": 120,
-    "local_dir": "/var/lib/myfiles/storage"
+    "local_dir": "/var/lib/myfiles/storage",
+    "r2_endpoint": "https://[ACCOUNT_ID].r2.cloudflarestorage.com/myfiles",
+    "r2_bucket": "myfiles",
+    "r2_access_key_id": "",
+    "r2_secret_access_key": "",
+    "r2_region": "auto",
+    "r2_prefix": "",
+    "r2_public_base_url": "https://r2.files.js.gripe"
   },
   "upload": {
     "max_bytes": 2147483648,

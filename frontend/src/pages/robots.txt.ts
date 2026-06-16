@@ -12,7 +12,8 @@ Disallow: /
 
 User-agent: *
 Allow: /
-# Private application surfaces and user-controlled file links are not useful crawl targets.
+# Private application surfaces are not useful crawl targets. Public /files links
+# remain crawlable so shared file URLs can be fetched directly.
 Disallow: /api/
 Disallow: /admin
 Disallow: /setup
@@ -20,7 +21,6 @@ Disallow: /dashboard/
 Disallow: /uploads/
 Disallow: /file/
 Disallow: /f/
-Disallow: /files/
 Disallow: /pickup/
 Sitemap: https://files.js.gripe/sitemap.xml
 `, { headers: { "Content-Type": "text/plain; charset=utf-8" } });

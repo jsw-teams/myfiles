@@ -10,9 +10,9 @@ Public purpose:
 - Administrators can audit and manage files according to policy.
 
 Crawler and AI-use policy:
-- Do not crawl, index, train on, summarize, extract, or use uploaded files as AI input.
-- Do not crawl /files, /pickup, /file, /f, /uploads, /dashboard, /api, /admin, or /setup.
-- Agents may read only the public homepage and discovery/authentication metadata.
+- Public /files links are directly fetchable when the file is public.
+- Do not crawl private application surfaces: /pickup, /file, /f, /uploads, /dashboard, /api, /admin, or /setup.
+- Agents may read public file links, the public homepage, and discovery/authentication metadata.
 
 Allowed discovery references:
 - https://files.js.gripe/auth.md

@@ -2,22 +2,29 @@
 import Base from "../../layouts/Base.astro";
 ---
 <Base titleKey="dashboard" noindex={true}>
-  <main id="main-content" class="pixel-shell dashboard-layout unified-dashboard">
-    <aside class="pixel-card sidebar">
-      <div class="brand"><img src="/assets/mascot-files.png" alt="" /><strong data-brand>myfiles</strong></div>
-      <nav id="nav" class="nav"></nav>
-    </aside>
-    <section id="dashboard-app" class="grid">
-      <div class="dashboard-hero">
+  <main id="main-content" class="console-shell">
+    <aside class="console-sidebar">
+      <a class="console-brand" href="/dashboard">
         <img src="/assets/mascot-files.png" alt="" />
+        <span data-brand>myfiles</span>
+      </a>
+      <nav id="nav" class="console-nav"></nav>
+    </aside>
+    <section class="console-main">
+      <header class="console-topbar">
         <div>
           <div class="pixel-kicker" data-i18n="dashboardKicker">控制台</div>
-          <h1 id="title" data-i18n="dashboardTitle">文件控制台</h1>
-          <p id="profile" class="muted"></p>
+          <h1 data-i18n="dashboardTitle">文件控制台</h1>
         </div>
+        <div class="console-user">
+          <p id="profile" class="muted"></p>
+          <a class="pixel-button secondary compact" href="/" data-i18n="home">首页</a>
+        </div>
+      </header>
+      <div id="dashboard-app" class="console-workspace">
+        <div class="console-loading">Loading...</div>
       </div>
-      <div id="cards" class="grid two"></div>
     </section>
   </main>
-  <script type="module" src="/app/dashboard.js?v=20260516m"></script>
+  <script type="module" src="/app/dashboard.js?v=20260616accounts3"></script>
 </Base>

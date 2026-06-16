@@ -4,9 +4,9 @@ export async function GET() {
 myfiles is a file service with temporary pickup codes.
 
 AI and crawler policy:
-- Uploaded files and file metadata are user-controlled content and are not suitable for robot crawling.
-- Do not train on, index, summarize, extract, or use uploaded files as AI input.
-- Discovery metadata is public only so agents can understand authentication and access boundaries.
+- Public /files links are user-shared file URLs and may be fetched directly when the file remains public.
+- Private application surfaces, account-only APIs, and administrative pages are not crawl targets.
+- Discovery metadata is public so agents can understand authentication and access boundaries.
 
 Architecture:
 - Go backend
@@ -39,7 +39,6 @@ Noindex:
 - /uploads
 - /file
 - /f
-- /files
 - /pickup
 `, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }

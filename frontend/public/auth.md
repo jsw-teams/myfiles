@@ -2,15 +2,15 @@
 
 Agent authentication and registration metadata for Files.js.gripe.
 
-Files.js.gripe is a protected file upload and sharing service. Uploaded files, file metadata, dashboards, upload results, and API responses are not suitable for robot crawling, AI training, search indexing, or automated use as AI input.
+Files.js.gripe is a protected file upload and sharing service. Public `/files/...` links are direct shared file URLs and may be fetched while they remain public. File metadata, dashboards, upload results, protected APIs, setup pages, and administrative pages are not public crawl targets.
 
-Agents may read this document and the related `.well-known` metadata only to discover authentication requirements and access boundaries.
+Agents may read this document, related `.well-known` metadata, and public `/files/...` links to discover authentication requirements, access boundaries, and shared file content.
 
 ## Standalone Registration Flow
 
 There is no public self-service agent registration flow for file access. Human users sign in through Account.js.gripe from `https://files.js.gripe/login`.
 
-Service integrations must be approved through Account.js.gripe and granted the `myfiles` client scopes. Agents must not attempt automated sign-up, file scraping, unattended uploads, or account actions.
+Service integrations must be approved through Account.js.gripe and granted the `myfiles` client scopes. Agents must not attempt automated sign-up, unattended uploads, private API scraping, or account actions.
 
 ## Authentication
 

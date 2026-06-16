@@ -17,6 +17,9 @@ func Migrate(conn *sql.DB) error {
 	if err := ensureFileColumns(conn); err != nil {
 		return err
 	}
+	if err := ensureAccountTables(conn); err != nil {
+		return err
+	}
 	if err := normalizeEmptyPickupCodes(conn); err != nil {
 		return err
 	}
@@ -85,6 +88,11 @@ func ensureFileColumns(conn *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureAccountTables(conn *sql.DB) error {
+	_, err := conn.Exec(accountSchema)
+	return err
 }
 
 func normalizeEmptyPickupCodes(conn *sql.DB) error {
@@ -200,6 +208,36 @@ CREATE TABLE IF NOT EXISTS file_events (
 );
 CREATE INDEX IF NOT EXISTS idx_file_events_file ON file_events(file_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  password_hash TEXT,
+  disabled INTEGER NOT NULL DEFAULT 0,
+  failed_login_count INTEGER NOT NULL DEFAULT 0,
+  locked_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_login_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_users_disabled ON users(disabled);
+
+CREATE TABLE IF NOT EXISTS user_identities (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  provider_user_id TEXT NOT NULL,
+  email TEXT,
+  display_name TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(provider, provider_user_id),
+  FOREIGN KEY(user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
+
 CREATE TABLE IF NOT EXISTS account_sessions (
   id TEXT PRIMARY KEY,
   session_hash TEXT NOT NULL UNIQUE,
@@ -242,6 +280,22 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_account_user_id, created_at DESC);
+`
+
+const accountSchema = `
+CREATE TABLE IF NOT EXISTS user_identities (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  provider_user_id TEXT NOT NULL,
+  email TEXT,
+  display_name TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(provider, provider_user_id),
+  FOREIGN KEY(user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
 `
 
 const pickupShareSchema = `

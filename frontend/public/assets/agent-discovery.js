@@ -18,7 +18,7 @@
   const tools = [
     {
       name: "list_discovery_resources",
-      description: "List public discovery resources for Files.js.gripe. This does not access uploaded files.",
+      description: "List public discovery resources for Files.js.gripe and explain public file-link access.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -27,7 +27,7 @@
       execute: async () => ({
         site,
         resources: discoveryResources,
-        crawlingPolicy: "Uploaded files and authenticated pages are not suitable for crawling, indexing, AI training, or agent input."
+        crawlingPolicy: "Public /files links may be fetched directly. Authenticated pages, APIs, admin pages, setup, upload result pages, and pickup flows are not crawl targets."
       })
     },
     {
@@ -44,8 +44,9 @@
         authentication: `${site}/auth.md`,
         openapi: `${site}/openapi.json`,
         oauthProtectedResource: `${site}/.well-known/oauth-protected-resource`,
-        blockedPaths: ["/api/", "/admin", "/setup", "/dashboard/", "/uploads/", "/file/", "/f/"],
-        note: "Do not crawl, train on, summarize, extract, or use uploaded files as AI input."
+        publicFilePaths: ["/files/{id}.{ext}", "/files/raw/{id}.{ext}"],
+        blockedPaths: ["/api/", "/admin", "/setup", "/dashboard/", "/uploads/", "/file/", "/f/", "/pickup/"],
+        note: "Public /files links can be fetched directly while they remain public."
       })
     }
   ];

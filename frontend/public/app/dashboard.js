@@ -2,39 +2,43 @@ const app = document.querySelector('#dashboard-app');
 const nav = document.querySelector('#nav');
 const profile = document.querySelector('#profile');
 const lang = (navigator.language || 'zh-CN').toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
-const state = { me: null, files: [], adminFiles: [], fileVisible: 20, adminVisible: 30, selectedFiles: new Set(), selectedAdminFiles: new Set(), settings: {}, settingsGroup: 0 };
+const state = { me: null, files: [], adminFiles: [], users: [], fileVisible: 20, adminVisible: 30, selectedFiles: new Set(), selectedAdminFiles: new Set(), settings: {}, settingsGroup: 0 };
 
 document.documentElement.lang = lang;
 
 const L = {
   'zh-CN': {
-    home: '概述', files: '我的文件', adminFiles: '全部文件管理', audit: '审计日志', settings: '站点设置', logout: '退出登录',
+    home: '概述', files: '我的文件', adminFiles: '全部文件管理', users: '账户管理', audit: '审计日志', settings: '站点设置', logout: '退出登录',
     dashboardDesc: '黑熊助手会把文件、取件码、审计和站点设置集中在这一个控制台路径里。',
     filesDesc: '查看上传批次取件码，或为单个文件建立临时取件码。',
     adminFilesDesc: '按文件名、所有者、文件 ID、SHA256 或 MIME 检索，并管理访问策略。',
+    usersDesc: '管理本地账户、角色、启停状态，以及 account-system 绑定后的落地用户。',
     auditDesc: '按时间线查看谁在什么时间对什么对象做了什么，重点信息会被展开显示。',
     settingsDesc: '有写入权限的管理员可直接编辑并保存站点设置。',
     searchFiles: '搜索文件名 / 文件 ID / SHA256 / MIME', searchAdminFiles: '搜索文件名 / 所有者 / 文件 ID / SHA256 / MIME',
     open: '访问', pickup: '取件码', del: '删除', props: '属性', save: '保存设置', reload: '重新读取',
-    emptyFiles: '没有符合条件的文件', emptyAudit: '暂无审计日志', loading: '正在加载...', noSettings: '暂无设置', saved: '设置已保存', saveFailed: '保存失败', createPickup: '建立文件取件码', tempPickup: '文件临时取件码', noPickup: '还没有有效取件码。', copy: '复制链接', revoke: '提前失效', uploadPickup: '上传取件码', confirmDelete: '确认软删除该文件？', confirmAdminDelete: '确认代管软删除？', owner: '所有者', public: '公开', private: '不公开', needConfirm: '需确认', noConfirm: '免确认',
+    emptyFiles: '没有符合条件的文件', emptyAudit: '暂无审计日志', loading: '正在加载...', noSettings: '暂无设置', saved: '设置已保存', saveFailed: '保存失败', createPickup: '建立文件取件码', tempPickup: '文件临时取件码', noPickup: '还没有有效取件码。', copy: '复制链接', revoke: '提前失效', uploadPickup: '上传取件码', confirmDelete: '确认永久删除该文件？', confirmAdminDelete: '确认代管永久删除？', owner: '所有者', public: '公开', private: '不公开', needConfirm: '需确认', noConfirm: '免确认',
     selectAll: '全选当前页', selected: '已选择', bulkDelete: '批量删除', bulkShare: '批量建立取件码', batchPickupReady: '批量取件码已建立', bulkPublic: '设为公开', bulkPrivate: '设为不公开', bulkConfirm: '设为需确认', bulkNoConfirm: '设为免确认', confirmBulkDelete: '确认删除选中的文件？', confirmBulkAdminDelete: '确认代管删除选中的文件？', pageSize: '每页显示', loadMore: '加载更多', showing: '当前显示', settingsPrev: '上一组', settingsNext: '下一组', settingsGroup: '设置分组',
     auditIpSearch: '按 IP 地址搜索', auditLimit: '显示数量',
-    yes: '是', no: '否',
+    storageMode: '存储模式', r2Endpoint: 'R2 S3 API 终结点', r2Bucket: 'R2 存储桶', r2AccessKeyId: 'R2 Access Key ID', r2SecretAccessKey: 'R2 Secret Access Key', r2SecretPlaceholder: '留空则不修改现有密钥', r2Region: 'R2 签名区域', r2Prefix: 'R2 对象前缀', storageTimeout: '存储超时秒数',
+    yes: '是', no: '否', createUser: '创建用户', role: '角色', disabled: '已停用', active: '可用', enable: '启用', disable: '停用', passwordOptional: '新密码（留空不改）', allowRegistration: '允许自主注册', ssoEnabled: '启用 account-system SSO',
     regionGlobal: '不限制地区', regionAllowOnly: '仅允许这些地区', regionDenyOnly: '排除这些地区', regionCodes: '地区代码', regionHint: '使用 ISO 国家/地区代码，用逗号分隔；仅会保存当前启用的一种方案。', regionQuick: '常用地区', regionClear: '清空地区', hotlinkAllow: '允许热链', hotlinkDeny: '禁止热链'
   },
   en: {
-    home: 'Overview', files: 'My files', adminFiles: 'All files', audit: 'Audit log', settings: 'Settings', logout: 'Sign out',
+    home: 'Overview', files: 'My files', adminFiles: 'All files', users: 'Accounts', audit: 'Audit log', settings: 'Settings', logout: 'Sign out',
     dashboardDesc: 'The bear assistant keeps files, pickup codes, audit events, and settings in one dashboard path.',
     filesDesc: 'View upload pickup codes or create temporary pickup codes for individual files.',
     adminFilesDesc: 'Search by name, owner, file ID, SHA256, or MIME, and manage access policy.',
+    usersDesc: 'Manage local accounts, roles, disabled state, and account-system linked users.',
     auditDesc: 'Review who did what, when, and to which target. Important details are expanded.',
     settingsDesc: 'Administrators with write permission can edit and save site settings here.',
     searchFiles: 'Search filename / file ID / SHA256 / MIME', searchAdminFiles: 'Search filename / owner / file ID / SHA256 / MIME',
     open: 'Open', pickup: 'Pickup code', del: 'Delete', props: 'Properties', save: 'Save settings', reload: 'Reload',
-    emptyFiles: 'No matching files', emptyAudit: 'No audit events yet', loading: 'Loading...', noSettings: 'No settings yet', saved: 'Settings saved', saveFailed: 'Save failed', createPickup: 'Create file pickup code', tempPickup: 'Temporary file pickup code', noPickup: 'No active pickup code yet.', copy: 'Copy link', revoke: 'Revoke early', uploadPickup: 'Upload pickup code', confirmDelete: 'Soft-delete this file?', confirmAdminDelete: 'Soft-delete this file as admin?', owner: 'Owner', public: 'Public', private: 'Private', needConfirm: 'Confirm', noConfirm: 'No confirm',
+    emptyFiles: 'No matching files', emptyAudit: 'No audit events yet', loading: 'Loading...', noSettings: 'No settings yet', saved: 'Settings saved', saveFailed: 'Save failed', createPickup: 'Create file pickup code', tempPickup: 'Temporary file pickup code', noPickup: 'No active pickup code yet.', copy: 'Copy link', revoke: 'Revoke early', uploadPickup: 'Upload pickup code', confirmDelete: 'Permanently delete this file?', confirmAdminDelete: 'Permanently delete this file as admin?', owner: 'Owner', public: 'Public', private: 'Private', needConfirm: 'Confirm', noConfirm: 'No confirm',
     selectAll: 'Select page', selected: 'selected', bulkDelete: 'Delete selected', bulkShare: 'Create pickup code', batchPickupReady: 'Batch pickup code created', bulkPublic: 'Make public', bulkPrivate: 'Make private', bulkConfirm: 'Require confirm', bulkNoConfirm: 'No confirmation', confirmBulkDelete: 'Delete selected files?', confirmBulkAdminDelete: 'Admin-delete selected files?', pageSize: 'Page size', loadMore: 'Load more', showing: 'Showing', settingsPrev: 'Previous', settingsNext: 'Next', settingsGroup: 'Settings group',
     auditIpSearch: 'Search by IP address', auditLimit: 'Rows',
-    yes: 'Yes', no: 'No',
+    storageMode: 'Storage mode', r2Endpoint: 'R2 S3 API endpoint', r2Bucket: 'R2 bucket', r2AccessKeyId: 'R2 Access Key ID', r2SecretAccessKey: 'R2 Secret Access Key', r2SecretPlaceholder: 'Leave blank to keep the current secret', r2Region: 'R2 signing region', r2Prefix: 'R2 object prefix', storageTimeout: 'Storage timeout seconds',
+    yes: 'Yes', no: 'No', createUser: 'Create user', role: 'Role', disabled: 'Disabled', active: 'Active', enable: 'Enable', disable: 'Disable', passwordOptional: 'New password (leave blank to keep)', allowRegistration: 'Allow self-registration', ssoEnabled: 'Enable account-system SSO',
     regionGlobal: 'No region limit', regionAllowOnly: 'Allow only these regions', regionDenyOnly: 'Block these regions', regionCodes: 'Region codes', regionHint: 'Use ISO country/region codes separated by commas. Only the active mode is saved.', regionQuick: 'Common regions', regionClear: 'Clear regions', hotlinkAllow: 'Allow hotlinking', hotlinkDeny: 'Block hotlinking'
   }
 }[lang];
@@ -43,6 +47,7 @@ const views = {
   home: { label: L.home, kicker: L.home, icon: 'home' },
   files: { label: L.files, kicker: L.files, icon: 'files' },
   'admin-files': { label: L.adminFiles, kicker: L.adminFiles, icon: 'folderCog', need: 'allFilesRead' },
+  users: { label: L.users, kicker: L.users, icon: 'users', need: 'usersRead' },
   audit: { label: L.audit, kicker: L.audit, icon: 'clipboardList', need: 'auditRead' },
   settings: { label: L.settings, kicker: L.settings, icon: 'settings', need: 'settingsWrite' }
 };
@@ -51,6 +56,7 @@ const iconPaths = {
   home: '<path d="m3 9 9-7 9 7"></path><path d="M9 22V12h6v10"></path><path d="M21 9v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9"></path>',
   files: '<path d="M20 7h-3a2 2 0 0 1-2-2V2"></path><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"></path><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"></path>',
   folderCog: '<path d="M10.5 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4.5L11 6h9a2 2 0 0 1 2 2v3.5"></path><circle cx="17" cy="17" r="3"></circle><path d="M17 13.5V12"></path><path d="M17 22v-1.5"></path><path d="m20 14.5-1.3.8"></path><path d="m15.3 18.7-1.3.8"></path><path d="m20 19.5-1.3-.8"></path><path d="m15.3 15.3-1.3-.8"></path>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path>',
   clipboardList: '<rect width="8" height="4" x="8" y="2" rx="1"></rect><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><path d="M12 11h4"></path><path d="M12 16h4"></path><path d="M8 11h.01"></path><path d="M8 16h.01"></path>',
   settings: '<path d="M9.7 3.4a1.6 1.6 0 0 1 3 0l.2.8a1.6 1.6 0 0 0 2.3 1l.7-.4a1.6 1.6 0 0 1 2.2 2.2l-.4.7a1.6 1.6 0 0 0 1 2.3l.8.2a1.6 1.6 0 0 1 0 3l-.8.2a1.6 1.6 0 0 0-1 2.3l.4.7a1.6 1.6 0 0 1-2.2 2.2l-.7-.4a1.6 1.6 0 0 0-2.3 1l-.2.8a1.6 1.6 0 0 1-3 0l-.2-.8a1.6 1.6 0 0 0-2.3-1l-.7.4a1.6 1.6 0 0 1-2.2-2.2l.4-.7a1.6 1.6 0 0 0-1-2.3l-.8-.2a1.6 1.6 0 0 1 0-3l.8-.2a1.6 1.6 0 0 0 1-2.3l-.4-.7a1.6 1.6 0 0 1 2.2-2.2l.7.4a1.6 1.6 0 0 0 2.3-1z"></path><circle cx="12" cy="12" r="3"></circle>',
   logOut: '<path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>'
@@ -58,32 +64,56 @@ const iconPaths = {
 
 const settingFields = [
   ['site', 'site.brandName', '站点名称', 'Site name', 'text'],
+  ['auth', 'auth.allowRegistration', '允许自主注册', 'Allow self-registration', 'bool'], ['auth', 'auth.ssoEnabled', '启用 account-system SSO', 'Enable account-system SSO', 'bool'],
   ['upload', 'upload.maxMB', '上传上限 MB', 'Upload limit MB', 'number'], ['upload', 'upload.allowAnonymous', '允许匿名上传', 'Allow anonymous upload', 'bool'], ['upload', 'upload.allowedMimeTypes', '允许 MIME 类型', 'Allowed MIME types', 'textarea'],
   ['file', 'file.defaultPublic', '默认公开', 'Default public', 'bool'], ['file', 'file.defaultRequireConfirm', '访问前确认', 'Require confirmation', 'bool'], ['file', 'file.defaultRegionPolicy', '地区策略', 'Region policy', 'region'], ['file', 'file.defaultHotlinkPolicy', '热链策略', 'Hotlink policy', 'hotlink'],
+  ['storage', 'storage.mode', '存储模式', 'Storage mode', 'storageMode'], ['storage', 'storage.r2Endpoint', 'R2 S3 API 终结点', 'R2 S3 API endpoint', 'text'], ['storage', 'storage.r2Bucket', 'R2 存储桶', 'R2 bucket', 'text'], ['storage', 'storage.r2AccessKeyId', 'R2 Access Key ID', 'R2 Access Key ID', 'text'], ['storage', 'storage.r2SecretAccessKey', 'R2 Secret Access Key', 'R2 Secret Access Key', 'secret'], ['storage', 'storage.r2Region', 'R2 签名区域', 'R2 signing region', 'text'], ['storage', 'storage.r2Prefix', 'R2 对象前缀', 'R2 object prefix', 'text'], ['storage', 'storage.timeoutSeconds', '存储超时秒数', 'Storage timeout seconds', 'number'],
   ['security', 'security.sessionTtlHours', '会话有效小时', 'Session TTL hours', 'number'], ['audit', 'audit.retentionDays', '审计保留天数', 'Audit retention days', 'number']
 ];
 
 const settingGroups = [
   ['site', '站点信息', 'Site'],
+  ['auth', '账户入口', 'Accounts'],
   ['upload', '上传规则', 'Upload'],
   ['file', '文件默认策略', 'File defaults'],
+  ['storage', '存储', 'Storage'],
   ['security', '安全', 'Security'],
   ['audit', '审计', 'Audit']
 ];
 
 boot().catch(() => { location.href = '/login'; });
-async function boot() { state.me = await api('/api/account/me'); const user = state.me.user || {}; profile.textContent = `${user.displayName || user.email || user.id} · ${user.role || user.userType}`; renderNav(); window.addEventListener('hashchange', renderRoute); renderRoute(); }
+async function boot() { state.me = await api('/api/auth/me'); const user = state.me.user || {}; profile.textContent = `${user.displayName || user.email || user.id} · ${user.role || user.userType}`; renderNav(); window.addEventListener('hashchange', renderRoute); renderRoute(); }
 function allowed(view) { const need = views[view]?.need; return !need || Boolean(state.me?.myfilesPermissions?.[need]); }
 function currentView() { const name = location.hash.replace('#', '') || 'home'; return views[name] && allowed(name) ? name : 'home'; }
 function renderNav() { nav.innerHTML = Object.entries(views).filter(([key]) => allowed(key)).map(([key, item]) => `<a class="dash-nav-item" href="/dashboard#${key}" data-view-link="${key}"><span>${iconSvg(item.icon)}${escapeHtml(item.label)}</span></a>`).join('') + `<button id="logout" class="dash-nav-item danger" type="button"><span>${iconSvg('logOut')}${escapeHtml(L.logout)}</span></button>`; document.querySelector('#logout').onclick = async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; }; }
-async function renderRoute() { const view = currentView(); document.querySelectorAll('[data-view-link]').forEach((link) => link.classList.toggle('active', link.dataset.viewLink === view)); if (view === 'home') return renderHome(); if (view === 'files') return renderFiles(); if (view === 'admin-files') return renderAdminFiles(); if (view === 'audit') return renderAudit(); if (view === 'settings') return renderSettings(); }
-function shell(title, kicker, desc, body) { app.innerHTML = `<section class="pixel-card dashboard-panel grid"><header class="page-head"><div class="bear-helper"><img src="/assets/mascot-files.png" alt="" /></div><div><div class="pixel-kicker">${escapeHtml(kicker)}</div><h1>${escapeHtml(title)}</h1><p class="muted">${escapeHtml(desc)}</p></div></header>${body}</section>`; }
-function renderHome() { const cards = Object.entries(views).filter(([key]) => key !== 'home' && allowed(key)).map(([key, item]) => `<a class="pixel-card dashboard-card" href="/dashboard#${key}"><span class="icon" aria-hidden="true">${iconSvg(item.icon)}</span><h3>${escapeHtml(item.label)}</h3></a>`).join(''); shell(L.home, L.home, L.dashboardDesc, `<div class="grid two">${cards}</div>`); }
+async function renderRoute() { const view = currentView(); document.querySelectorAll('[data-view-link]').forEach((link) => link.classList.toggle('active', link.dataset.viewLink === view)); if (view === 'home') return renderHome(); if (view === 'files') return renderFiles(); if (view === 'admin-files') return renderAdminFiles(); if (view === 'users') return renderUsers(); if (view === 'audit') return renderAudit(); if (view === 'settings') return renderSettings(); }
+function shell(title, kicker, desc, body) { app.innerHTML = `<section class="workbench-view"><header class="workbench-head"><div><div class="pixel-kicker">${escapeHtml(kicker)}</div><h2>${escapeHtml(title)}</h2><p class="muted">${escapeHtml(desc)}</p></div></header>${body}</section>`; }
+function renderHome() { const cards = Object.entries(views).filter(([key]) => key !== 'home' && allowed(key)).map(([key, item]) => `<a class="dashboard-card" href="/dashboard#${key}"><span class="icon" aria-hidden="true">${iconSvg(item.icon)}</span><h3>${escapeHtml(item.label)}</h3><p class="muted">${escapeHtml(key === 'files' ? L.filesDesc : key === 'admin-files' ? L.adminFilesDesc : key === 'audit' ? L.auditDesc : L.settingsDesc)}</p></a>`).join(''); shell(L.home, L.home, L.dashboardDesc, `<section class="dashboard-overview"><img src="/assets/myfiles-dashboard-v2.png" alt="" /><div class="dashboard-card-grid">${cards}</div></section>`); }
 async function renderFiles() { state.selectedFiles.clear(); shell(L.files, L.files, L.filesDesc, `<div class="toolbar"><label class="sr-only" for="files-q">${escapeHtml(L.searchFiles)}</label><input id="files-q" class="input" autocomplete="off" placeholder="${escapeAttr(L.searchFiles)}" /><label class="page-size"><span>${escapeHtml(L.pageSize)}</span><select id="files-size" class="input"><option>10</option><option selected>20</option><option>50</option></select></label></div><div class="bulk-bar"><label><input type="checkbox" data-select-page="files" /> ${escapeHtml(L.selectAll)}</label><span id="files-selected">0 ${escapeHtml(L.selected)}</span><button class="pixel-button compact" data-bulk-share="files" type="button">${escapeHtml(L.bulkShare)}</button><button class="pixel-button danger compact" data-bulk-delete="files" type="button">${escapeHtml(L.bulkDelete)}</button></div><div id="files-list" class="data-list list-frame" aria-live="polite">${skeletonCards(6)}</div><div id="files-pager" class="pager"></div>`); const q = document.querySelector('#files-q'); const size = document.querySelector('#files-size'); q.addEventListener('input', debounce(() => loadFiles(q.value), 180)); size.addEventListener('change', () => { state.fileVisible = Number(size.value || 20); renderFileList(); }); await loadFiles(''); }
 async function loadFiles(query) { const list = document.querySelector('#files-list'); list.innerHTML = skeletonCards(6); const json = await api('/api/files?q=' + encodeURIComponent(query || '') + '&limit=200'); state.files = json.files || []; state.selectedFiles.clear(); renderFileList(); }
 function renderFileList() { const visible = state.files.slice(0, state.fileVisible); document.querySelector('#files-list').innerHTML = visible.map((f) => fileCard(f, 'files')).join('') || empty(L.emptyFiles); document.querySelector('#files-pager').innerHTML = pagerHTML(visible.length, state.files.length, 'files'); updateBulkUI('files'); }
 function fileCard(f, scope = 'files') { const selected = scope === 'admin' ? state.selectedAdminFiles.has(f.id) : state.selectedFiles.has(f.id); const pickup = f.uploadPickupCode ? `<div class="pickup-mini"><span>${escapeHtml(L.uploadPickup)}</span><strong>${escapeHtml(f.uploadPickupCode)}</strong></div>` : ''; return `<article class="data-card"><label class="select-cell"><input type="checkbox" data-select-${scope}="${escapeAttr(f.id)}" ${selected ? 'checked' : ''} /><span class="sr-only">${escapeHtml(f.originalName)}</span></label><div><h3>${escapeHtml(f.originalName)}</h3><p class="muted">${escapeHtml(f.mime)} · ${formatSize(f.size)} · ${escapeHtml(f.createdAt)}</p><small>${escapeHtml(f.id)}<br>${escapeHtml(f.sha256)}</small>${pickup}</div><div class="card-actions"><a class="pixel-button secondary compact" href="${escapeAttr(publicFilePath(f))}" target="_blank">${escapeHtml(L.open)}</a><a class="pixel-button compact" href="/dashboard#file-${escapeAttr(f.id)}" data-file-detail="${escapeAttr(f.id)}">${escapeHtml(L.pickup)}</a><button class="pixel-button danger compact" data-delete-file="${escapeAttr(f.id)}">${escapeHtml(L.del)}</button></div></article>`; }
 async function renderAdminFiles() { state.selectedAdminFiles.clear(); shell(L.adminFiles, L.adminFiles, L.adminFilesDesc, `<div class="toolbar"><label class="sr-only" for="admin-files-q">${escapeHtml(L.searchAdminFiles)}</label><input id="admin-files-q" class="input" autocomplete="off" placeholder="${escapeAttr(L.searchAdminFiles)}" /><label class="page-size"><span>${escapeHtml(L.pageSize)}</span><select id="admin-files-size" class="input"><option>15</option><option selected>30</option><option>75</option></select></label></div><div class="bulk-bar"><label><input type="checkbox" data-select-page="admin" /> ${escapeHtml(L.selectAll)}</label><span id="admin-selected">0 ${escapeHtml(L.selected)}</span><button class="pixel-button secondary compact" data-bulk-policy="public" type="button">${escapeHtml(L.bulkPublic)}</button><button class="pixel-button secondary compact" data-bulk-policy="private" type="button">${escapeHtml(L.bulkPrivate)}</button><button class="pixel-button secondary compact" data-bulk-policy="confirm" type="button">${escapeHtml(L.bulkConfirm)}</button><button class="pixel-button secondary compact" data-bulk-policy="no-confirm" type="button">${escapeHtml(L.bulkNoConfirm)}</button><button class="pixel-button danger compact" data-bulk-delete="admin" type="button">${escapeHtml(L.bulkDelete)}</button></div><div id="admin-files-list" class="data-list list-frame" aria-live="polite">${skeletonCards(8)}</div><div id="admin-files-pager" class="pager"></div>`); const q = document.querySelector('#admin-files-q'); const size = document.querySelector('#admin-files-size'); q.addEventListener('input', debounce(() => loadAdminFiles(q.value), 180)); size.addEventListener('change', () => { state.adminVisible = Number(size.value || 30); renderAdminFileList(); }); await loadAdminFiles(''); }
+async function renderUsers() {
+  shell(L.users, L.users, L.usersDesc, `<form id="user-create-form" class="settings-lite user-create"><div class="form-grid"><label class="field-block"><span>Email</span><input class="input" name="email" type="email" required /></label><label class="field-block"><span>${escapeHtml(lang === 'zh-CN' ? '显示名' : 'Display name')}</span><input class="input" name="displayName" type="text" required /></label><label class="field-block"><span>${escapeHtml(L.role)}</span><select class="input" name="role">${roleOptions('user')}</select></label><label class="field-block"><span>${escapeHtml(L.passwordOptional)}</span><input class="input" name="password" type="password" minlength="10" required /></label></div><button class="pixel-button compact" type="submit">${escapeHtml(L.createUser)}</button><div id="users-alert" role="alert"></div></form><div id="users-list" class="data-list list-frame">${skeletonCards(4)}</div>`);
+  document.querySelector('#user-create-form').addEventListener('submit', createUser);
+  await loadUsers();
+}
+async function loadUsers() { const json = await api('/api/admin/users'); state.users = json.users || []; renderUserList(); }
+function renderUserList() { document.querySelector('#users-list').innerHTML = state.users.map(userCard).join('') || empty(L.emptyFiles); }
+function userCard(u) {
+  return `<article class="data-card user-card"><div><h3>${escapeHtml(u.displayName || u.email)}</h3><p class="muted">${escapeHtml(u.email)} · ${escapeHtml(u.disabled ? L.disabled : L.active)} · ${escapeHtml(u.lastLoginAt || u.createdAt || '')}</p><small>${escapeHtml(u.id)}</small></div><div class="card-actions"><select class="input compact-input" data-user-role="${escapeAttr(u.id)}">${roleOptions(u.role)}</select><button class="pixel-button secondary compact" type="button" data-user-toggle="${escapeAttr(u.id)}" data-disabled="${u.disabled ? '1' : '0'}">${escapeHtml(u.disabled ? L.enable : L.disable)}</button></div></article>`;
+}
+function roleOptions(current) { return ['user', 'operator', 'auditor', 'system_admin'].map((role) => `<option value="${role}" ${role === current ? 'selected' : ''}>${role}</option>`).join(''); }
+async function createUser(event) {
+  event.preventDefault();
+  const alert = document.querySelector('#users-alert');
+  const body = Object.fromEntries(new FormData(event.currentTarget).entries());
+  try {
+    await api('/api/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    alert.className = 'pixel-alert ok'; alert.textContent = L.saved; event.currentTarget.reset(); await loadUsers();
+  } catch (error) { alert.className = 'pixel-alert'; alert.textContent = `${L.saveFailed}: ${error.message}`; }
+}
 async function loadAdminFiles(query) { const list = document.querySelector('#admin-files-list'); list.innerHTML = skeletonCards(8); const json = await api('/api/admin/files?q=' + encodeURIComponent(query || '') + '&owner=' + encodeURIComponent(query || '') + '&limit=300'); state.adminFiles = json.files || []; state.selectedAdminFiles.clear(); renderAdminFileList(); }
 function renderAdminFileList() { const visible = state.adminFiles.slice(0, state.adminVisible); document.querySelector('#admin-files-list').innerHTML = visible.map(adminFileCard).join('') || empty(L.emptyFiles); document.querySelector('#admin-files-pager').innerHTML = pagerHTML(visible.length, state.adminFiles.length, 'admin'); updateBulkUI('admin'); }
 function adminFileCard(f) { const selected = state.selectedAdminFiles.has(f.id); return `<article class="data-card"><label class="select-cell"><input type="checkbox" data-select-admin="${escapeAttr(f.id)}" ${selected ? 'checked' : ''} /><span class="sr-only">${escapeHtml(f.originalName)}</span></label><div><h3>${escapeHtml(f.originalName)}</h3><p class="muted">${escapeHtml(L.owner)}: ${escapeHtml(f.ownerUserId || 'anonymous')} · ${escapeHtml(f.status)}</p><small>${escapeHtml(f.id)}<br>${escapeHtml(f.sha256)}</small><div class="policy-row"><span>${f.isPublic ? L.public : L.private}</span><span>${f.requireConfirm ? L.needConfirm : L.noConfirm}</span><span>${escapeHtml(f.regionPolicy)}/${escapeHtml(f.hotlinkPolicy)}</span></div></div><div class="card-actions"><a class="pixel-button secondary compact" href="/admin/open/${escapeAttr(f.id)}" target="_blank">${escapeHtml(L.open)}</a><button class="pixel-button danger compact" data-admin-delete="${escapeAttr(f.id)}">${escapeHtml(L.del)}</button></div></article>`; }
@@ -131,10 +161,23 @@ function renderSettingsGroup() {
 function fieldHTML(key, label, value, type, disabled) {
   const attrs = `name="${escapeAttr(key)}" class="input" ${disabled ? 'disabled' : ''}`;
   if (type === 'bool') return choiceField(key, label, value === true, [[true, L.yes], [false, L.no]]);
+  if (type === 'storageMode') return choiceField(key, label, 'r2', [['r2', 'R2']]);
   if (type === 'region') return regionPolicyField(key, label, value || 'global');
   if (type === 'hotlink') return choiceField(key, label, value || 'allow', [['allow', L.hotlinkAllow], ['deny', L.hotlinkDeny]]);
+  if (type === 'secret') return `<label class="field-block"><span>${escapeHtml(label)}</span><input ${attrs} type="password" autocomplete="new-password" placeholder="${escapeAttr(L.r2SecretPlaceholder)}" value="" /></label>`;
   if (type === 'textarea') return `<label class="field-block"><span>${escapeHtml(label)}</span><textarea ${attrs} rows="3">${escapeHtml(Array.isArray(value) ? value.join('\n') : value ?? '')}</textarea></label>`;
+  if (type === 'number') {
+    const numericValue = formatNumberSettingValue(key, value);
+    return `<label class="field-block"><span>${escapeHtml(label)}</span><input ${attrs} type="number" inputmode="decimal" step="any" min="0" value="${escapeAttr(numericValue)}" /></label>`;
+  }
   return `<label class="field-block"><span>${escapeHtml(label)}</span><input ${attrs} type="${type}" value="${escapeAttr(value ?? '')}" /></label>`;
+}
+function formatNumberSettingValue(key, value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '';
+  if (key === 'upload.maxMB') return String(Math.max(1, Math.round(n)));
+  if (Number.isInteger(n)) return String(n);
+  return String(Number(n.toFixed(4)));
 }
 function choiceField(key, label, value, options) {
   return `<fieldset class="choice-field"><legend>${escapeHtml(label)}</legend><div class="segmented">${options.map(([optionValue, optionLabel]) => {
@@ -160,7 +203,7 @@ function regionPolicyField(key, label, value) {
   </fieldset>`;
 }
 async function saveSettingsLite(event) { event.preventDefault(); if (!state.me?.myfilesPermissions?.settingsWrite) return; const form = event.currentTarget; const body = {}; new FormData(form).forEach((raw, key) => { if (!key) return; body[key] = normalizeSetting(key, raw); }); const alert = document.querySelector('#settings-alert'); try { await api('/api/admin/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); alert.className = 'pixel-alert ok'; alert.textContent = L.saved; } catch (error) { alert.className = 'pixel-alert'; alert.textContent = `${L.saveFailed}: ${error.message}`; } }
-function normalizeSetting(key, raw) { const value = String(raw ?? '').trim(); if (['upload.allowAnonymous', 'file.defaultPublic', 'file.defaultRequireConfirm'].includes(key)) return value === 'true'; if (['upload.maxMB', 'security.sessionTtlHours', 'audit.retentionDays'].includes(key)) return Number(value || 0); if (key === 'upload.allowedMimeTypes') return value.split(/\n|,/).map((item) => item.trim()).filter(Boolean); return value; }
+function normalizeSetting(key, raw) { const value = String(raw ?? '').trim(); if (['upload.allowAnonymous', 'file.defaultPublic', 'file.defaultRequireConfirm', 'auth.allowRegistration', 'auth.ssoEnabled'].includes(key)) return value === 'true'; if (['upload.maxMB', 'security.sessionTtlHours', 'audit.retentionDays', 'storage.timeoutSeconds'].includes(key)) return Number(value || 0); if (key === 'upload.allowedMimeTypes') return value.split(/\n|,/).map((item) => item.trim()).filter(Boolean); return value; }
 app.addEventListener('click', async (event) => {
   const detail = event.target.closest('[data-file-detail]');
   if (detail) { event.preventDefault(); return renderFileDetail(detail.dataset.fileDetail); }
@@ -177,6 +220,8 @@ app.addEventListener('click', async (event) => {
   if (bulkShare) return runBulkShare();
   const bulkPolicy = event.target.closest('[data-bulk-policy]');
   if (bulkPolicy) return runBulkAdminPolicy(bulkPolicy.dataset.bulkPolicy);
+  const userToggle = event.target.closest('[data-user-toggle]');
+  if (userToggle) { await api('/api/admin/users/' + encodeURIComponent(userToggle.dataset.userToggle), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ disabled: userToggle.dataset.disabled !== '1' }) }); return loadUsers(); }
   const group = event.target.closest('[data-settings-group]');
   if (group) { state.settingsGroup = Number(group.dataset.settingsGroup || 0); return renderSettingsGroup(); }
   if (event.target.closest('[data-settings-prev]')) { state.settingsGroup = Math.max(0, state.settingsGroup - 1); return renderSettingsGroup(); }
@@ -185,13 +230,15 @@ app.addEventListener('click', async (event) => {
   if (chip) { toggleRegionChip(chip.closest('[data-region-policy]'), chip.dataset.regionChip); return; }
   if (event.target.closest('[data-region-clear]')) { const root = event.target.closest('[data-region-policy]'); const input = root?.querySelector('[data-region-codes]'); if (input) input.value = ''; updateRegionPolicy(root); }
 });
-app.addEventListener('change', (event) => {
+app.addEventListener('change', async (event) => {
   const file = event.target.closest('[data-select-files]');
   if (file) { toggleSet(state.selectedFiles, file.dataset.selectFiles, file.checked); return updateBulkUI('files'); }
   const admin = event.target.closest('[data-select-admin]');
   if (admin) { toggleSet(state.selectedAdminFiles, admin.dataset.selectAdmin, admin.checked); return updateBulkUI('admin'); }
   const page = event.target.closest('[data-select-page]');
   if (page) return selectVisible(page.dataset.selectPage, page.checked);
+  const role = event.target.closest('[data-user-role]');
+  if (role) { await api('/api/admin/users/' + encodeURIComponent(role.dataset.userRole), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: role.value }) }); return loadUsers(); }
   if (event.target.closest('[data-region-mode]')) return updateRegionPolicy(event.target.closest('[data-region-policy]'));
 });
 app.addEventListener('input', (event) => {
@@ -238,7 +285,7 @@ async function runBulkAdminPolicy(action) {
 }
 async function api(path, opts = {}) { const res = await fetch(path, { credentials: 'include', ...opts }); const json = await res.json().catch(() => ({})); if (!res.ok || json.ok === false) throw new Error(json.error || 'Request failed'); return json; }
 function publicFilePath(file) { const ext = String(file.originalName || '').match(/\.[a-z0-9]{1,10}$/i)?.[0]?.toLowerCase() || ''; return `/files/${file.id}${ext}`; }
-function empty(text) { return `<div class="empty-state">${escapeHtml(text)}</div>`; }
+function empty(text) { return `<div class="empty-state"><img src="/assets/myfiles-dashboard-v2.png" alt="" /><span>${escapeHtml(text)}</span></div>`; }
 function skeletonCards(count) { return Array.from({ length: count }, () => '<article class="data-card skeleton-card"><div class="skeleton-check"></div><div><span></span><p></p><small></small></div><div class="card-actions"><b></b><b></b></div></article>').join(''); }
 function skeletonAudit(count) { return Array.from({ length: count }, () => '<article class="audit-card skeleton-card"><div><span></span><p></p></div><div><span></span><p></p><small></small></div><div><span></span><p></p></div></article>').join(''); }
 function skeletonFields(count) { return Array.from({ length: count }, () => '<label class="skeleton-field"><span></span><i></i></label>').join(''); }

@@ -12,6 +12,8 @@ type MyfilesPermissions struct {
 	SettingsWrite   bool `json:"settingsWrite"`
 	StorageSettings bool `json:"storageSettings"`
 	CDNSettings     bool `json:"cdnSettings"`
+	UsersRead       bool `json:"usersRead"`
+	UsersWrite      bool `json:"usersWrite"`
 }
 
 func derivePermissions(role, userType string, capabilities map[string]any) MyfilesPermissions {
@@ -25,6 +27,7 @@ func derivePermissions(role, userType string, capabilities map[string]any) Myfil
 			FilesRead: true, FilesWrite: true, AllFilesRead: true, AllFilesWrite: true,
 			BatchesRead: true, BatchesWrite: true, AuditRead: true,
 			SettingsRead: true, SettingsWrite: true, StorageSettings: true, CDNSettings: true,
+			UsersRead: true, UsersWrite: true,
 		}
 	case "operator":
 		return MyfilesPermissions{

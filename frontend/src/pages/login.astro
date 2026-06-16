@@ -5,56 +5,184 @@ import Base from "../layouts/Base.astro";
   <main id="main-content" class="login-page pixel-auth">
     <section class="login-card">
       <div class="login-art">
-        <img src="/assets/mascot-files.png" alt="" />
+        <img src="/assets/myfiles-auth-v2.png" alt="" />
         <div class="bear-bubble">
-          <div class="pixel-kicker" data-i18n="loginKicker">身份验证</div>
+          <div class="pixel-kicker" data-login-kicker>LOCAL ACCOUNT</div>
           <h1 data-brand>myfiles</h1>
-          <p data-i18n="loginBubble">黑熊会把账户授权安全带回文件服务。</p>
+          <p data-login-copy>使用 myfiles 本地账户进入文件控制台。</p>
         </div>
       </div>
       <div class="login-form-panel">
-        <h2 data-i18n="loginTitle">登录</h2>
-        <p class="muted" data-i18n="loginDesc">登录成功后将进入文件控制台，可管理文件、建立分享取件码和查看策略。</p>
-        <button id="login" class="pixel-button" data-i18n="loginButton">打开登录</button>
+        <h2 data-login-title>登录</h2>
+        <p class="muted" data-login-desc>先输入邮箱，再继续输入密码。</p>
+        <form id="login-form" class="grid" autocomplete="on">
+          <section id="email-step" class="login-step grid">
+            <label class="field-block">
+              <span data-login-email>邮箱</span>
+              <input id="login-email" class="input" name="email" type="email" autocomplete="username" required />
+            </label>
+            <button id="continue-email" class="pixel-button" type="button" data-login-continue>继续</button>
+            <div class="auth-actions login-sso-row">
+              <button id="sso-login" class="pixel-button secondary compact" type="button" hidden data-sso-login>SSO 登录</button>
+            </div>
+          </section>
+          <section id="password-step" class="login-step grid" hidden>
+            <button id="back-email" class="text-button" type="button" data-login-back>更换邮箱</button>
+            <label class="field-block locked-email">
+              <span data-login-email>邮箱</span>
+              <input id="login-email-view" class="input" type="email" disabled />
+            </label>
+            <label class="field-block">
+              <span data-login-password>密码</span>
+              <input id="login-password" class="input" name="password" type="password" autocomplete="current-password" required />
+            </label>
+            <button class="pixel-button" type="submit" data-login-submit>登录</button>
+          </section>
+          <input id="login-email-hidden" name="email" type="hidden" />
+        </form>
+        <div class="auth-actions">
+          <a id="register-link" class="pixel-button secondary compact" href="/register" hidden data-register-link>注册</a>
+        </div>
         <div id="alert" class="pixel-alert" role="alert" style="display:none"></div>
       </div>
     </section>
   </main>
   <script>
-    const btn = document.querySelector("#login");
+    const lang = (navigator.language || "zh-CN").toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+    const labels = {
+      "zh-CN": {
+        copy: "使用 myfiles 本地账户进入文件控制台。",
+        title: "登录",
+        desc: "先输入邮箱，再继续输入密码。",
+        email: "邮箱",
+        password: "密码",
+        continue: "继续",
+        back: "更换邮箱",
+        submit: "登录",
+        register: "注册新账户",
+        sso: "使用 account-system 登录",
+        setup: "系统尚未初始化，正在前往初始化页面。",
+        failed: "登录失败，请检查邮箱和密码。",
+        popupBlocked: "登录小窗被浏览器拦截，请允许弹窗后重试。"
+      },
+      en: {
+        copy: "Sign in with your local myfiles account.",
+        title: "Sign in",
+        desc: "Enter your email first, then continue to password.",
+        email: "Email",
+        password: "Password",
+        continue: "Continue",
+        back: "Change email",
+        submit: "Sign in",
+        register: "Create account",
+        sso: "Sign in with account-system",
+        setup: "Setup is required. Redirecting.",
+        failed: "Sign-in failed. Check your email and password.",
+        popupBlocked: "The sign-in popup was blocked. Allow popups and try again."
+      }
+    }[lang];
+    document.querySelector("[data-login-copy]").textContent = labels.copy;
+    document.querySelector("[data-login-title]").textContent = labels.title;
+    document.querySelector("[data-login-desc]").textContent = labels.desc;
+    document.querySelectorAll("[data-login-email]").forEach((node) => { node.textContent = labels.email; });
+    document.querySelector("[data-login-password]").textContent = labels.password;
+    document.querySelector("[data-login-continue]").textContent = labels.continue;
+    document.querySelector("[data-login-back]").textContent = labels.back;
+    document.querySelector("[data-login-submit]").textContent = labels.submit;
+    document.querySelector("[data-register-link]").textContent = labels.register;
+    document.querySelector("[data-sso-login]").textContent = labels.sso;
+
+    const form = document.querySelector("#login-form");
     const alertBox = document.querySelector("#alert");
-    let labels = { loginError: "登录未完成，请重试。", loginRetry: "登录未完成，请重新尝试。" };
-    document.addEventListener("site-i18n-ready", (event) => { labels = event.detail?.labels || labels; });
-    const showError = (text) => { alertBox.textContent = text || labels.loginError; alertBox.style.display = "block"; };
-    const params = new URLSearchParams(location.search);
-    if (params.get("error")) showError(labels.loginRetry);
-    fetch("/api/account/me", { cache: "no-store" })
+    const registerLink = document.querySelector("#register-link");
+    const ssoButton = document.querySelector("#sso-login");
+    const emailStep = document.querySelector("#email-step");
+    const passwordStep = document.querySelector("#password-step");
+    const emailInput = document.querySelector("#login-email");
+    const emailHidden = document.querySelector("#login-email-hidden");
+    const emailView = document.querySelector("#login-email-view");
+    const passwordInput = document.querySelector("#login-password");
+    const continueButton = document.querySelector("#continue-email");
+    const backButton = document.querySelector("#back-email");
+    const show = (message) => {
+      alertBox.textContent = message;
+      alertBox.style.display = "block";
+    };
+
+    fetch("/api/auth/options?_v=20260616accounts3", { cache: "no-store" })
+      .then((res) => res.ok ? res.json() : null)
+      .then((json) => {
+        if (json && json.initialized === false) {
+          show(labels.setup);
+          setTimeout(() => location.replace("/setup"), 500);
+          return;
+        }
+        if (json?.allowRegistration) registerLink.hidden = false;
+        if (json?.ssoConfigured && json?.ssoEnabled) ssoButton.hidden = false;
+      })
+      .catch(() => {});
+
+    fetch("/api/auth/me", { cache: "no-store", credentials: "include" })
       .then((res) => res.ok ? res.json() : null)
       .then((json) => {
         if (json?.ok) location.replace("/dashboard");
       })
       .catch(() => {});
 
-    btn.addEventListener("click", () => {
-      alertBox.style.display = "none";
-      const popup = window.open("/auth/account/start?popup=1", "myfilesAccountLogin", "popup=yes,width=520,height=720");
-      if (!popup) {
-        location.href = "/auth/account/start?popup=1";
-        return;
+    const showPasswordStep = () => {
+      const email = emailInput.value.trim();
+      if (!emailInput.reportValidity() || !email) return;
+      emailHidden.value = email;
+      emailView.value = email;
+      emailStep.hidden = true;
+      passwordStep.hidden = false;
+      passwordInput.focus();
+    };
+    continueButton.addEventListener("click", showPasswordStep);
+    emailInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        showPasswordStep();
       }
-      const timer = setInterval(() => {
-        if (popup.closed) {
-          clearInterval(timer);
-        }
-      }, 700);
+    });
+    backButton.addEventListener("click", () => {
+      passwordStep.hidden = true;
+      emailStep.hidden = false;
+      passwordInput.value = "";
+      emailInput.focus();
     });
 
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      alertBox.style.display = "none";
+      if (!emailHidden.value) {
+        showPasswordStep();
+        return;
+      }
+      const body = Object.fromEntries(new FormData(form).entries());
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify(body)
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || json.ok === false) throw new Error(json.error || labels.failed);
+        location.href = "/dashboard";
+      } catch (error) {
+        show(error.message || labels.failed);
+      }
+    });
+
+    ssoButton.addEventListener("click", () => {
+      const popup = window.open("/auth/account/start?popup=1", "myfiles-sso", "width=520,height=680,noopener=false");
+      if (!popup) show(labels.popupBlocked);
+    });
     window.addEventListener("message", (event) => {
-      if (event.origin !== location.origin) return;
-      const data = event.data || {};
-      if (data.source !== "myfiles-auth") return;
-      if (data.status === "ok") location.href = data.redirectTo || "/dashboard";
-      else showError(data.message);
+      if (event.origin !== location.origin || event.data?.source !== "myfiles-auth") return;
+      if (event.data.status === "ok") location.href = event.data.redirectTo || "/dashboard";
+      else show(event.data.message || labels.failed);
     });
   </script>
 </Base>

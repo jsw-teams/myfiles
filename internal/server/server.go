@@ -1,11 +1,13 @@
 package server
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"image"
@@ -108,11 +110,33 @@ func isProbePath(p string) bool {
 
 func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
+	if a.requiresSetup(p) {
+		if strings.HasPrefix(p, "/api/") {
+			writeError(w, http.StatusPreconditionRequired, "setup_required", "系统尚未初始化", map[string]any{"setupPath": "/setup"})
+			return
+		}
+		http.Redirect(w, r, "/setup", http.StatusFound)
+		return
+	}
 	switch {
 	case p == "/healthz":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "myfiles"})
+	case p == "/favicon.ico":
+		http.Redirect(w, r, "/assets/favicon-32.png", http.StatusMovedPermanently)
 	case p == "/api/bootstrap":
 		a.handleBootstrap(w, r)
+	case p == "/api/setup/status":
+		a.handleSetupStatus(w, r)
+	case p == "/api/setup/init":
+		a.handleSetupInit(w, r)
+	case p == "/api/auth/login":
+		a.handleLocalLogin(w, r)
+	case p == "/api/auth/register":
+		a.handleLocalRegister(w, r)
+	case p == "/api/auth/options":
+		a.handleAuthOptions(w, r)
+	case p == "/api/auth/me":
+		a.handleAuthMe(w, r)
 	case p == "/auth/account/start":
 		a.handleAuthStart(w, r)
 	case p == "/auth/account/callback":
@@ -123,6 +147,12 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.handleLogout(w, r)
 	case p == "/api/upload":
 		a.handleUpload(w, r)
+	case p == "/api/upload/r2/init":
+		a.handleR2UploadInit(w, r)
+	case p == "/api/upload/r2/complete":
+		a.handleR2UploadComplete(w, r)
+	case p == "/api/upload/r2/cancel":
+		a.handleR2UploadCancel(w, r)
 	case p == "/api/upload/chunk/init":
 		a.handleChunkInit(w, r)
 	case p == "/api/upload/chunk/cancel":
@@ -155,9 +185,13 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.handleAdminAudit(w, r)
 	case p == "/api/admin/settings":
 		a.handleAdminSettings(w, r)
+	case p == "/api/admin/users":
+		a.handleAdminUsers(w, r)
+	case strings.HasPrefix(p, "/api/admin/users/"):
+		a.handleAdminUserAPI(w, r)
 	case p == "/api/admin/storage/test":
 		a.handleAdminStorageTest(w, r)
-	case strings.HasPrefix(p, "/files/"):
+	case p == "/files" || strings.HasPrefix(p, "/files/"):
 		a.handlePublicFile(w, r)
 	case strings.HasPrefix(p, "/og/"):
 		a.handlePublicOGImage(w, r)
@@ -170,6 +204,34 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 	default:
 		a.serveFrontend(w, r)
 	}
+}
+
+func (a *App) requiresSetup(path string) bool {
+	if a.initialized() {
+		return false
+	}
+	if path == "/healthz" || path == "/setup" || strings.HasPrefix(path, "/setup/") {
+		return false
+	}
+	if path == "/login" || path == "/register" {
+		return false
+	}
+	if path == "/api/setup/status" || path == "/api/setup/init" {
+		return false
+	}
+	if path == "/api/auth/options" {
+		return false
+	}
+	if path == "/files" || strings.HasPrefix(path, "/files/") {
+		return false
+	}
+	if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/app/") || strings.HasPrefix(path, "/vendor/") {
+		return false
+	}
+	if path == "/favicon.ico" || path == "/robots.txt" {
+		return false
+	}
+	return true
 }
 
 func (a *App) handleBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -187,13 +249,18 @@ func (a *App) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			"allowedMimeTypes": policy.AllowedMIMETypes,
 			"allowAnonymous":   policy.AllowAnonymous,
 		},
-		"account": map[string]any{"loginPath": "/login", "startPath": "/auth/account/start?popup=1"},
+		"account": map[string]any{"loginPath": "/login", "registerPath": "/register", "startPath": "/auth/account/start?popup=1", "allowRegistration": a.currentAuthOptions().AllowRegistration, "ssoEnabled": a.currentAuthOptions().SSOEnabled},
+		"setup":   map[string]any{"initialized": a.initialized(), "path": "/setup"},
 	})
 }
 
 func (a *App) handleAuthStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	if !a.currentAuthOptions().SSOEnabled {
+		writeError(w, 403, "sso_disabled", "当前站点未启用 SSO 登录", nil)
 		return
 	}
 	state := ids.New("st")
@@ -245,12 +312,17 @@ func (a *App) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		a.popupHTML(w, false, "/login?error="+url.QueryEscape(code), msg)
 		return
 	}
-	if err := a.createSession(w, user); err != nil {
+	localUser, err := a.upsertSSOUser("account-system", user)
+	if err != nil {
+		a.popupHTML(w, false, "/login?error=sso_user", "统一账户绑定到本地用户失败")
+		return
+	}
+	if err := a.createSession(w, localUser); err != nil {
 		a.popupHTML(w, false, "/login?error=session", "文件服务会话创建失败")
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "myfiles_oauth_state", Value: "", Path: "/auth/account", MaxAge: -1, HttpOnly: true, Secure: a.cfg.Security.CookieSecure, SameSite: http.SameSiteLaxMode})
-	audit.Write(a.db, r, audit.Actor{AccountUserID: user.ID, Role: user.Role}, "auth.login", "account_user", user.ID, map[string]any{"client": "myfiles"})
+	audit.Write(a.db, r, audit.Actor{AccountUserID: localUser.ID, Role: localUser.Role}, "auth.login", "account_user", user.ID, map[string]any{"client": "myfiles", "localUserId": localUser.ID})
 	a.popupHTML(w, true, "/dashboard", "登录成功")
 }
 
@@ -399,6 +471,321 @@ type chunkUploadFile struct {
 	Type       string `json:"type,omitempty"`
 	Chunks     int    `json:"chunks"`
 	UploadedAt string `json:"uploadedAt,omitempty"`
+}
+
+type r2DirectUploadManifest struct {
+	ID        string               `json:"id"`
+	BatchID   string               `json:"batchId"`
+	Owner     string               `json:"owner"`
+	Role      string               `json:"role"`
+	CreatedAt string               `json:"createdAt"`
+	UpdatedAt string               `json:"updatedAt"`
+	ExpiresAt string               `json:"expiresAt"`
+	Files     []r2DirectUploadFile `json:"files"`
+}
+
+type r2DirectUploadFile struct {
+	ClientID  string `json:"clientId"`
+	FileID    string `json:"fileId"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	Type      string `json:"type"`
+	SHA256    string `json:"sha256"`
+	Key       string `json:"key"`
+	Mode      string `json:"mode"`
+	UploadID  string `json:"uploadId,omitempty"`
+	PartSize  int64  `json:"partSize,omitempty"`
+	PartCount int    `json:"partCount,omitempty"`
+}
+
+type r2DirectCompletePart struct {
+	PartNumber int    `json:"partNumber"`
+	ETag       string `json:"etag"`
+}
+
+const r2DirectUploadThreshold int64 = 64 * 1024 * 1024
+const r2DirectDefaultPartSize int64 = 64 * 1024 * 1024
+const downloadConfirmMaxAge = 15 * 60
+
+func (a *App) handleR2UploadInit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	cfg := a.snapshotConfig()
+	if cfg.Storage.Mode != "r2" {
+		writeError(w, 400, "storage_mode_invalid", "当前存储未配置为 R2", nil)
+		return
+	}
+	if err := storage.ValidateR2Config(cfg.Storage); err != nil {
+		writeError(w, 400, "storage_config_invalid", err.Error(), nil)
+		return
+	}
+	policy := a.effectiveUploadPolicy()
+	s, _ := a.readSession(r)
+	if s == nil && !policy.AllowAnonymous {
+		writeError(w, 401, "unauthorized", "请先登录后上传", nil)
+		return
+	}
+	var body struct {
+		Files []struct {
+			ClientID string `json:"clientId"`
+			Name     string `json:"name"`
+			Size     int64  `json:"size"`
+			Type     string `json:"type"`
+			SHA256   string `json:"sha256"`
+		} `json:"files"`
+		PartSize int64 `json:"partSize"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		writeError(w, 400, "bad_request", "上传初始化参数无效", nil)
+		return
+	}
+	if len(body.Files) == 0 {
+		writeError(w, 400, "file_required", "没有收到文件", nil)
+		return
+	}
+	if len(body.Files) > 100 {
+		writeError(w, 400, "too_many_files", "一次最多上传 100 个文件", nil)
+		return
+	}
+	owner, role := "", ""
+	if s != nil {
+		owner = s.User.ID
+		role = s.User.Role
+	}
+	batch, err := myfiles.CreateBatch(a.db, owner)
+	if err != nil {
+		writeError(w, 500, "db_error", "创建上传批次失败", nil)
+		return
+	}
+	now := time.Now()
+	manifest := r2DirectUploadManifest{
+		ID: ids.New("rup"), BatchID: batch.ID, Owner: owner, Role: role,
+		CreatedAt: now.UTC().Format(time.RFC3339),
+		UpdatedAt: now.UTC().Format(time.RFC3339),
+		ExpiresAt: now.Add(chunkUploadExpiry).UTC().Format(time.RFC3339),
+	}
+	partSize := normalizeR2PartSize(body.PartSize)
+	type partPayload struct {
+		PartNumber int    `json:"partNumber"`
+		URL        string `json:"url"`
+	}
+	type filePayload struct {
+		ClientID  string        `json:"clientId"`
+		FileID    string        `json:"fileId"`
+		Name      string        `json:"name"`
+		Size      int64         `json:"size"`
+		Type      string        `json:"type"`
+		Key       string        `json:"key"`
+		Mode      string        `json:"mode"`
+		URL       string        `json:"url,omitempty"`
+		UploadID  string        `json:"uploadId,omitempty"`
+		PartSize  int64         `json:"partSize,omitempty"`
+		PartCount int           `json:"partCount,omitempty"`
+		Parts     []partPayload `json:"parts,omitempty"`
+	}
+	files := make([]filePayload, 0, len(body.Files))
+	for i, input := range body.Files {
+		name := filepath.Base(strings.TrimSpace(input.Name))
+		if name == "." || name == "" {
+			name = fmt.Sprintf("file-%d", i+1)
+		}
+		if input.Size < 0 || input.Size > policy.MaxBytes {
+			writeError(w, 413, "upload_too_large", "文件超过当前允许的上传限制", nil)
+			return
+		}
+		mimeType := directUploadMIME(input.Type, name)
+		if !mimeAllowed(mimeType, policy.AllowedMIMETypes) {
+			writeError(w, 400, "mime_not_allowed", "当前文件类型不允许上传", nil)
+			return
+		}
+		fileID := ids.New("fil")
+		key := storage.R2ObjectKey(cfg.Storage, fileID, name)
+		clientID := strings.TrimSpace(input.ClientID)
+		if clientID == "" {
+			clientID = fileID
+		}
+		entry := r2DirectUploadFile{ClientID: clientID, FileID: fileID, Name: name, Size: input.Size, Type: mimeType, SHA256: strings.ToLower(strings.TrimSpace(input.SHA256)), Key: key}
+		out := filePayload{ClientID: clientID, FileID: fileID, Name: name, Size: input.Size, Type: mimeType, Key: key}
+		if input.Size <= r2DirectUploadThreshold {
+			url, err := storage.PresignR2PutURL(cfg.Storage, key, 30*time.Minute)
+			if err != nil {
+				writeError(w, 500, "storage_sign_failed", "签发 R2 上传地址失败", nil)
+				return
+			}
+			entry.Mode = "put"
+			out.Mode = "put"
+			out.URL = url
+		} else {
+			uploadID, err := storage.CreateR2MultipartUpload(r.Context(), cfg.Storage, key, mimeType)
+			if err != nil {
+				writeError(w, 500, "storage_multipart_failed", "创建 R2 分片上传失败", nil)
+				return
+			}
+			partCount := int((input.Size + partSize - 1) / partSize)
+			if partCount > 10000 {
+				_ = storage.AbortR2MultipartUpload(context.Background(), cfg.Storage, key, uploadID)
+				writeError(w, 413, "too_many_parts", "文件过大或分片过小", nil)
+				return
+			}
+			out.Mode = "multipart"
+			out.UploadID = uploadID
+			out.PartSize = partSize
+			out.PartCount = partCount
+			entry.Mode = "multipart"
+			entry.UploadID = uploadID
+			entry.PartSize = partSize
+			entry.PartCount = partCount
+			for partNumber := 1; partNumber <= partCount; partNumber++ {
+				url, err := storage.PresignR2UploadPartURL(cfg.Storage, key, uploadID, partNumber, 30*time.Minute)
+				if err != nil {
+					_ = storage.AbortR2MultipartUpload(context.Background(), cfg.Storage, key, uploadID)
+					writeError(w, 500, "storage_sign_failed", "签发 R2 分片地址失败", nil)
+					return
+				}
+				out.Parts = append(out.Parts, partPayload{PartNumber: partNumber, URL: url})
+			}
+		}
+		manifest.Files = append(manifest.Files, entry)
+		files = append(files, out)
+	}
+	if err := a.saveR2DirectManifest(manifest); err != nil {
+		writeError(w, 500, "temp_create_failed", "写入上传状态失败", nil)
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "uploadId": manifest.ID, "batchId": manifest.BatchID, "expiresAt": manifest.ExpiresAt,
+		"files": files,
+	})
+}
+
+func (a *App) handleR2UploadComplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	cfg := a.snapshotConfig()
+	policy := a.effectiveUploadPolicy()
+	var body struct {
+		UploadID string `json:"uploadId"`
+		Files    []struct {
+			ClientID string                 `json:"clientId"`
+			FileID   string                 `json:"fileId"`
+			ETag     string                 `json:"etag"`
+			Parts    []r2DirectCompletePart `json:"parts"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&body); err != nil || strings.TrimSpace(body.UploadID) == "" {
+		writeError(w, 400, "bad_request", "上传完成参数无效", nil)
+		return
+	}
+	manifest, err := a.loadR2DirectManifest(body.UploadID)
+	if err != nil {
+		writeError(w, 404, "upload_not_found", "上传会话不存在或已过期", nil)
+		return
+	}
+	if manifest.expired(time.Now()) {
+		_ = os.RemoveAll(a.r2DirectUploadDir(manifest.ID))
+		writeError(w, 410, "upload_expired", "上传会话已过期，请重新上传", nil)
+		return
+	}
+	completedByID := map[string]struct {
+		ETag  string
+		Parts []r2DirectCompletePart
+	}{}
+	for _, file := range body.Files {
+		completedByID[file.FileID] = struct {
+			ETag  string
+			Parts []r2DirectCompletePart
+		}{ETag: file.ETag, Parts: file.Parts}
+	}
+	type item struct {
+		OK    bool   `json:"ok"`
+		File  any    `json:"file,omitempty"`
+		Error string `json:"error,omitempty"`
+		Code  string `json:"code,omitempty"`
+		Name  string `json:"name,omitempty"`
+	}
+	items := []item{}
+	success, failed := 0, 0
+	for _, file := range manifest.Files {
+		done, ok := completedByID[file.FileID]
+		if !ok {
+			failed++
+			items = append(items, item{OK: false, Name: file.Name, Code: "upload_incomplete", Error: "文件尚未完成上传"})
+			continue
+		}
+		if file.Mode == "multipart" {
+			parts := make([]storage.R2MultipartPart, 0, len(done.Parts))
+			for _, part := range done.Parts {
+				parts = append(parts, storage.R2MultipartPart{PartNumber: part.PartNumber, ETag: part.ETag})
+			}
+			if err := storage.CompleteR2MultipartUpload(r.Context(), cfg.Storage, file.Key, file.UploadID, parts); err != nil {
+				failed++
+				items = append(items, item{OK: false, Name: file.Name, Code: "storage_multipart_failed", Error: err.Error()})
+				continue
+			}
+		} else if !storage.R2ObjectExists(r.Context(), cfg.Storage, file.Key) {
+			failed++
+			items = append(items, item{OK: false, Name: file.Name, Code: "storage_upload_failed", Error: "R2 对象不存在"})
+			continue
+		}
+		f, code, err := a.createR2UploadedFileRecord(r, manifest.BatchID, manifest.Owner, file, policy)
+		if err != nil {
+			failed++
+			items = append(items, item{OK: false, Name: file.Name, Code: code, Error: err.Error()})
+			continue
+		}
+		success++
+		items = append(items, item{OK: true, File: f, Name: file.Name})
+	}
+	status := "completed"
+	if failed > 0 && success == 0 {
+		status = "failed"
+	} else if failed > 0 {
+		status = "partial"
+	}
+	_ = myfiles.UpdateBatchCounts(a.db, manifest.BatchID, len(manifest.Files), success, failed, status)
+	audit.Write(a.db, r, audit.Actor{AccountUserID: manifest.Owner, Role: manifest.Role}, "upload.create", "upload_batch", manifest.BatchID, map[string]any{"total": len(manifest.Files), "success": success, "failed": failed, "r2Direct": true})
+	if failed == 0 {
+		_ = os.RemoveAll(a.r2DirectUploadDir(manifest.ID))
+	}
+	batch, _, _ := myfiles.GetBatch(a.db, manifest.BatchID)
+	writeJSON(w, 200, map[string]any{
+		"ok":              true,
+		"batchId":         manifest.BatchID,
+		"pickupCode":      batch.PickupCode,
+		"pickupExpiresAt": batch.PickupExpiresAt,
+		"status":          status,
+		"items":           items,
+		"resultPath":      "/uploads/" + url.PathEscape(manifest.BatchID),
+		"downloadPath":    "/uploads/" + url.PathEscape(manifest.BatchID),
+	})
+}
+
+func (a *App) handleR2UploadCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+	var body struct {
+		UploadID string `json:"uploadId"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil || strings.TrimSpace(body.UploadID) == "" {
+		writeError(w, 400, "bad_request", "取消上传参数无效", nil)
+		return
+	}
+	if manifest, err := a.loadR2DirectManifest(body.UploadID); err == nil {
+		cfg := a.snapshotConfig()
+		for _, file := range manifest.Files {
+			if file.Mode == "multipart" {
+				_ = storage.AbortR2MultipartUpload(context.Background(), cfg.Storage, file.Key, file.UploadID)
+			}
+		}
+		_ = os.RemoveAll(a.r2DirectUploadDir(manifest.ID))
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (a *App) handleChunkInit(w http.ResponseWriter, r *http.Request) {
@@ -721,6 +1108,75 @@ func (m chunkUploadManifest) expired(now time.Time) bool {
 	return !expiresAt.IsZero() && now.After(expiresAt)
 }
 
+func (m r2DirectUploadManifest) expired(now time.Time) bool {
+	expiresAt, err := time.Parse(time.RFC3339, m.ExpiresAt)
+	if err != nil {
+		createdAt, _ := time.Parse(time.RFC3339, m.CreatedAt)
+		expiresAt = createdAt.Add(chunkUploadExpiry)
+	}
+	return !expiresAt.IsZero() && now.After(expiresAt)
+}
+
+func normalizeR2PartSize(size int64) int64 {
+	if size <= 0 {
+		size = r2DirectDefaultPartSize
+	}
+	min := int64(5 * 1024 * 1024)
+	if size < min {
+		size = min
+	}
+	if size > 512*1024*1024 {
+		size = 512 * 1024 * 1024
+	}
+	rem := size % min
+	if rem != 0 {
+		size -= rem
+	}
+	if size < min {
+		return min
+	}
+	return size
+}
+
+func (a *App) r2DirectUploadRoot() string {
+	return filepath.Join(a.cfg.App.TempDir, "r2-direct")
+}
+
+func (a *App) r2DirectUploadDir(uploadID string) string {
+	return filepath.Join(a.r2DirectUploadRoot(), filepath.Base(uploadID))
+}
+
+func (a *App) r2DirectManifestPath(uploadID string) string {
+	return filepath.Join(a.r2DirectUploadDir(uploadID), "manifest.json")
+}
+
+func (a *App) saveR2DirectManifest(manifest r2DirectUploadManifest) error {
+	if err := os.MkdirAll(a.r2DirectUploadDir(manifest.ID), 0750); err != nil {
+		return err
+	}
+	tmp := a.r2DirectManifestPath(manifest.ID) + ".tmp"
+	b, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(tmp, b, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.r2DirectManifestPath(manifest.ID))
+}
+
+func (a *App) loadR2DirectManifest(uploadID string) (r2DirectUploadManifest, error) {
+	var manifest r2DirectUploadManifest
+	b, err := os.ReadFile(a.r2DirectManifestPath(filepath.Base(uploadID)))
+	if err != nil {
+		return manifest, err
+	}
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		return manifest, err
+	}
+	return manifest, nil
+}
+
 func (m chunkUploadManifest) matchesFiles(files []struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
@@ -934,6 +1390,63 @@ func (a *App) processTempUpload(ctx context.Context, r *http.Request, tmpPath, b
 	return f, "", nil
 }
 
+func (a *App) createR2UploadedFileRecord(r *http.Request, batchID, owner string, file r2DirectUploadFile, policy uploadPolicy) (myfiles.File, string, error) {
+	if file.Size > policy.MaxBytes {
+		return myfiles.File{}, "upload_too_large", fmt.Errorf("文件超过当前允许的上传限制")
+	}
+	mimeType := directUploadMIME(file.Type, file.Name)
+	if !mimeAllowed(mimeType, policy.AllowedMIMETypes) {
+		return myfiles.File{}, "mime_not_allowed", fmt.Errorf("当前文件类型不允许上传")
+	}
+	shaHex := strings.ToLower(strings.TrimSpace(file.SHA256))
+	if !looksSHA256Hex(shaHex) {
+		shaHex = "unverified-" + file.FileID
+	}
+	publicURL := a.publicBaseURL(r) + publicFilePath(file.FileID, file.Name)
+	f, err := myfiles.CreateFile(a.db, myfiles.CreateFileInput{
+		ID: file.FileID, BatchID: batchID, OwnerUserID: owner, OriginalName: file.Name, StoredName: file.Key,
+		MIME: mimeType, Size: file.Size, SHA256: shaHex,
+		StorageProvider: "r2", StorageFileID: file.Key, StorageURL: file.Key, PublicURL: publicURL,
+		IsPublic: policy.DefaultPublic, RequireConfirm: policy.DefaultRequireConfirm,
+		RegionPolicy: policy.DefaultRegionPolicy, HotlinkPolicy: policy.DefaultHotlinkPolicy,
+	})
+	if err != nil {
+		return myfiles.File{}, "db_error", fmt.Errorf("保存文件记录失败")
+	}
+	_, _ = a.db.Exec(`INSERT INTO file_events (id, file_id, batch_id, owner_user_id, event_type, detail_json, created_at)
+		VALUES (?, ?, ?, ?, 'uploaded', '{}', ?)`, ids.New("evt"), f.ID, batchID, nullEmpty(owner), time.Now().UTC().Format(time.RFC3339))
+	return f, "", nil
+}
+
+func directUploadMIME(value, name string) string {
+	if mt := strings.TrimSpace(value); mt != "" {
+		if parsed, _, err := mime.ParseMediaType(mt); err == nil && parsed != "" {
+			return parsed
+		}
+	}
+	if ext := filepath.Ext(name); ext != "" {
+		if mt := mime.TypeByExtension(ext); mt != "" {
+			if parsed, _, err := mime.ParseMediaType(mt); err == nil && parsed != "" {
+				return parsed
+			}
+			return mt
+		}
+	}
+	return "application/octet-stream"
+}
+
+func looksSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func fileSHA256(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1075,8 +1588,15 @@ func (a *App) handleFilesBatch(w http.ResponseWriter, r *http.Request) {
 	case "delete":
 		deleted := 0
 		for _, id := range authorized {
-			if err := myfiles.SoftDelete(a.db, id); err == nil {
+			f, err := myfiles.GetFile(a.db, id, false)
+			if err != nil {
+				continue
+			}
+			if err := a.deleteFilePermanently(r.Context(), f); err == nil {
 				deleted++
+			} else {
+				writeError(w, 500, "delete_failed", "删除文件失败", map[string]any{"fileId": id, "message": err.Error()})
+				return
 			}
 		}
 		audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "file.batch.delete", "file", "", map[string]any{"count": deleted, "fileIds": authorized})
@@ -1140,7 +1660,7 @@ func (a *App) handleFileAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 403, "forbidden", "无权删除该文件", nil)
 			return
 		}
-		if err := myfiles.SoftDelete(a.db, id); err != nil {
+		if err := a.deleteFilePermanently(r.Context(), f); err != nil {
 			writeError(w, 500, "db_error", "删除文件失败", nil)
 			return
 		}
@@ -1317,6 +1837,10 @@ func (a *App) handlePickupFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) > actionIndex && parts[actionIndex] == "download-confirm" {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			a.renderDownloadConfirmPage(w, r, f, pickupFilePath(code, f.ID, f.OriginalName), pickupFilePath(code, f.ID, f.OriginalName)+"/download-confirm")
+			return
+		}
 		if isPreviewableMedia(f.MIME, f.OriginalName) {
 			http.Redirect(w, r, fileURL, http.StatusSeeOther)
 			return
@@ -1338,7 +1862,9 @@ func (a *App) handlePickupFile(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, fileURL, http.StatusSeeOther)
 			return
 		}
-		a.clearDownloadConfirmation(w, r, downloadConfirmCookieName("pickup", code, f.ID), "/pickup")
+		if a.redirectR2Download(w, r, f) {
+			return
+		}
 		a.serveStoredFile(w, r, f, false)
 		return
 	}
@@ -1380,11 +1906,50 @@ func (a *App) serveStoredFile(w http.ResponseWriter, r *http.Request, f myfiles.
 		a.streamTGBotsFile(w, r, f)
 		return
 	}
+	if f.StorageProvider == "r2" && f.StorageFileID != "" {
+		if isInlinePDFPreviewRequest(r, f) {
+			f.IsPublic = publicCache
+			a.streamR2File(w, r, f)
+			return
+		}
+		if a.redirectR2StoredFile(w, r, f, publicCache) {
+			return
+		}
+		f.IsPublic = publicCache
+		a.streamR2File(w, r, f)
+		return
+	}
 	if f.StorageURL != "" {
 		http.Redirect(w, r, f.StorageURL, http.StatusFound)
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func isInlinePDFPreviewRequest(r *http.Request, f myfiles.File) bool {
+	return r.URL.Query().Get("preview") == "1" && isPDFFile(f.MIME, f.OriginalName)
+}
+
+func (a *App) deleteFilePermanently(ctx context.Context, f myfiles.File) error {
+	switch f.StorageProvider {
+	case "local":
+		if strings.TrimSpace(f.StorageURL) != "" {
+			if err := os.Remove(f.StorageURL); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	case "r2":
+		cfg := a.snapshotConfig()
+		if err := storage.DeleteR2Object(ctx, cfg.Storage, f.StorageFileID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(f.ThumbnailFileID) != "" && f.ThumbnailFileID != f.StorageFileID {
+			if err := storage.DeleteR2Object(ctx, cfg.Storage, f.ThumbnailFileID); err != nil {
+				return err
+			}
+		}
+	}
+	return myfiles.HardDelete(a.db, f.ID)
 }
 
 func (a *App) serveFaststartVideo(w http.ResponseWriter, r *http.Request, f myfiles.File) {
@@ -1659,6 +2224,18 @@ func (a *App) faststartInputPath(ctx context.Context, f myfiles.File) (string, f
 			cleanup()
 			return "", func() {}, err
 		}
+	case f.StorageProvider == "r2" && f.StorageFileID != "":
+		cfg := a.snapshotConfig()
+		req, err := storage.NewR2FetchRequest(ctx, cfg.Storage, f.StorageFileID)
+		if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		resp, err = storage.NewR2HTTPClient(cfg.Storage).Do(req)
+		if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
 	case f.StorageURL != "":
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.StorageURL, nil)
 		if err != nil {
@@ -1694,6 +2271,32 @@ func contentDisposition(r *http.Request, f myfiles.File) string {
 	return mode + "; filename=" + strconv.Quote(f.OriginalName)
 }
 
+func downloadContentDisposition(f myfiles.File) string {
+	name := strings.TrimSpace(f.OriginalName)
+	if name == "" {
+		name = f.ID
+	}
+	fallback := asciiFilename(name)
+	encoded := strings.ReplaceAll(url.PathEscape(name), "+", "%20")
+	return "attachment; filename=" + strconv.Quote(fallback) + "; filename*=UTF-8''" + encoded
+}
+
+func asciiFilename(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r >= 0x20 && r <= 0x7e && r != '"' && r != '\\' && r != '/' {
+			b.WriteRune(r)
+		} else if r == '/' || r == '\\' {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "download"
+	}
+	return out
+}
+
 func setStoredFileCacheHeaders(w http.ResponseWriter, f myfiles.File, publicCache bool) {
 	if publicCache {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, s-maxage=31536000, immutable")
@@ -1715,30 +2318,34 @@ func fileEntityTag(f myfiles.File) string {
 	return ""
 }
 
-func fileIcon(mime, name string) string {
+func fileIconAsset(mime, name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
 	switch {
 	case strings.HasPrefix(mime, "image/"):
-		return "▧"
+		return "/assets/icons/lucide-file-image.svg"
 	case strings.HasPrefix(mime, "video/"):
-		return "▶"
+		return "/assets/icons/lucide-file-video.svg"
 	case strings.HasPrefix(mime, "audio/"):
-		return "♪"
+		return "/assets/icons/lucide-file-audio.svg"
 	case strings.Contains(mime, "pdf") || ext == ".pdf":
-		return "◫"
+		return "/assets/icons/lucide-file-text.svg"
 	case strings.Contains(mime, "zip") || strings.Contains(mime, "archive") || ext == ".zip" || ext == ".rar" || ext == ".7z" || ext == ".gz":
-		return "▣"
+		return "/assets/icons/lucide-file-archive.svg"
 	case strings.Contains(mime, "json") || strings.Contains(mime, "javascript") || strings.Contains(mime, "xml") || ext == ".js" || ext == ".json" || ext == ".html" || ext == ".css":
-		return "{ }"
+		return "/assets/icons/lucide-file-code.svg"
 	case strings.Contains(mime, "spreadsheet") || ext == ".csv" || ext == ".xls" || ext == ".xlsx":
-		return "▦"
+		return "/assets/icons/lucide-file-spreadsheet.svg"
 	case strings.Contains(mime, "presentation") || ext == ".ppt" || ext == ".pptx":
-		return "▥"
+		return "/assets/icons/lucide-presentation.svg"
 	case strings.HasPrefix(mime, "text/") || ext == ".txt" || ext == ".md" || ext == ".doc" || ext == ".docx":
-		return "▤"
+		return "/assets/icons/lucide-file-text.svg"
 	default:
-		return "◇"
+		return "/assets/icons/lucide-file.svg"
 	}
+}
+
+func fileIconHTML(mime, name string) string {
+	return `<img src="` + html.EscapeString(fileIconAsset(mime, name)) + `" alt="" loading="lazy">`
 }
 
 func formatTimeLabel(value string) string {
@@ -1806,8 +2413,15 @@ func (a *App) handleAdminFilesBatch(w http.ResponseWriter, r *http.Request) {
 	for _, id := range idsList {
 		switch body.Action {
 		case "delete":
-			if err := myfiles.SoftDelete(a.db, id); err == nil {
+			f, err := myfiles.GetFile(a.db, id, false)
+			if err != nil {
+				continue
+			}
+			if err := a.deleteFilePermanently(r.Context(), f); err == nil {
 				count++
+			} else {
+				writeError(w, 500, "delete_failed", "删除文件失败", map[string]any{"fileId": id, "message": err.Error()})
+				return
 			}
 		case "public":
 			v := true
@@ -1872,8 +2486,12 @@ func (a *App) handleAdminFileAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 403, "forbidden", "无权代管删除文件", nil)
 			return
 		}
-		f, _ := myfiles.GetFile(a.db, id, true)
-		if err := myfiles.SoftDelete(a.db, id); err != nil {
+		f, err := myfiles.GetFile(a.db, id, false)
+		if err != nil {
+			writeError(w, 404, "not_found", "文件不存在", nil)
+			return
+		}
+		if err := a.deleteFilePermanently(r.Context(), f); err != nil {
 			writeError(w, 500, "db_error", "删除文件失败", nil)
 			return
 		}
@@ -1909,6 +2527,11 @@ func (a *App) handleAdminOpenFile(w http.ResponseWriter, r *http.Request) {
 	if f.StorageProvider == "tgbots" && f.StorageFileID != "" {
 		f.IsPublic = false
 		a.streamTGBotsFile(w, r, f)
+		return
+	}
+	if f.StorageProvider == "r2" && f.StorageFileID != "" {
+		f.IsPublic = false
+		a.streamR2File(w, r, f)
 		return
 	}
 	if f.StorageURL != "" {
@@ -1958,6 +2581,7 @@ func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		settings := configSettings(a.snapshotConfig())
+		a.attachRuntimeSettings(settings)
 		writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
 	case http.MethodPatch:
 		if !s.Permissions.SettingsWrite {
@@ -1969,21 +2593,81 @@ func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "bad_json", "请求体格式错误", nil)
 			return
 		}
-		if s := strings.TrimSpace(stringValue(body["site.baseUrl"])); s == "" || isLocalBaseURL(s) {
-			body["site.baseUrl"] = requestOrigin(r)
+		if raw, exists := body["site.baseUrl"]; exists {
+			if s := strings.TrimSpace(stringValue(raw)); s == "" || isLocalBaseURL(s) {
+				body["site.baseUrl"] = requestOrigin(r)
+			}
 		}
-		if s := strings.TrimSpace(stringValue(body["cdn.baseUrl"])); s == "" || isLocalBaseURL(s) {
-			body["cdn.baseUrl"] = requestOrigin(r)
+		if raw, exists := body["cdn.baseUrl"]; exists {
+			if s := strings.TrimSpace(stringValue(raw)); s == "" || isLocalBaseURL(s) {
+				body["cdn.baseUrl"] = requestOrigin(r)
+			}
 		}
-		if err := a.patchConfigSettings(body); err != nil {
-			writeError(w, 400, "config_save_failed", err.Error(), nil)
-			return
+		configBody, runtimeBody := splitSettingsPatch(body)
+		if len(configBody) > 0 {
+			if err := a.patchConfigSettings(configBody); err != nil {
+				writeError(w, 400, "config_save_failed", err.Error(), nil)
+				return
+			}
 		}
+		if len(runtimeBody) > 0 {
+			if err := a.patchRuntimeSettings(runtimeBody); err != nil {
+				writeError(w, 400, "settings_save_failed", err.Error(), nil)
+				return
+			}
+		}
+		settings := configSettings(a.snapshotConfig())
+		a.attachRuntimeSettings(settings)
 		audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "settings.patch", "config_file", "myfiles", body)
-		writeJSON(w, 200, map[string]any{"ok": true, "settings": configSettings(a.snapshotConfig())})
+		writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
 	default:
 		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
 	}
+}
+
+func splitSettingsPatch(body map[string]any) (map[string]any, map[string]any) {
+	configBody := map[string]any{}
+	runtimeBody := map[string]any{}
+	for key, value := range body {
+		if strings.HasPrefix(key, "auth.") {
+			runtimeBody[key] = value
+			continue
+		}
+		configBody[key] = value
+	}
+	return configBody, runtimeBody
+}
+
+func (a *App) attachRuntimeSettings(settings map[string]any) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	values := map[string]any{
+		"auth.allowRegistration": false,
+		"auth.ssoEnabled":        true,
+	}
+	for key, fallback := range values {
+		value := fallback
+		if stored, ok := a.settingValue(key); ok {
+			value = stored
+		}
+		settings[key] = map[string]any{"value": value, "updatedAt": now}
+	}
+}
+
+func (a *App) patchRuntimeSettings(body map[string]any) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	for key, value := range body {
+		switch key {
+		case "auth.allowRegistration", "auth.ssoEnabled":
+			raw, _ := json.Marshal(boolValue(value))
+			if _, err := a.db.Exec(`INSERT INTO site_settings(key, value_json, updated_at) VALUES(?, ?, ?)
+				ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at`, key, string(raw), now); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported runtime setting: %s", key)
+		}
+	}
+	return nil
 }
 
 func (a *App) handleAdminStorageTest(w http.ResponseWriter, r *http.Request) {
@@ -2133,6 +2817,29 @@ func mediaKind(mimeType, name string) string {
 	}
 }
 
+func isOfficePreviewFile(mimeType, name string) bool {
+	return false
+}
+
+func isPDFFile(mimeType, name string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
+	mimeType = strings.ToLower(strings.TrimSpace(effectiveMIME(mimeType, name)))
+	return ext == ".pdf" || strings.Contains(mimeType, "pdf")
+}
+
+func officePreviewLabel(mimeType, name string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	switch {
+	case ext == ".ppt" || ext == ".pptx" || strings.Contains(mimeType, "presentation"):
+		return "Presentation"
+	case ext == ".xls" || ext == ".xlsx" || strings.Contains(mimeType, "spreadsheet") || strings.Contains(mimeType, "excel"):
+		return "Spreadsheet"
+	default:
+		return "Document"
+	}
+}
+
 func effectiveFileMIME(f myfiles.File) string {
 	return effectiveMIME(f.MIME, f.OriginalName)
 }
@@ -2212,12 +2919,23 @@ func pickupRawFilePath(code, id, name string) string {
 func (a *App) publicPreviewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File, embed bool) {
 	fileURL := publicFilePath(f.ID, f.OriginalName)
 	rawFileURL := publicRawFilePath(f.ID, f.OriginalName)
+	mediaURL := rawFileURL
+	if u := a.publicR2ResourceURL(f); u != "" {
+		mediaURL = u
+	}
 	a.previewHTML(w, r, f, embed, previewLinks{
-		MediaURL:    rawFileURL,
+		MediaURL:    mediaURL,
 		PreviewURL:  requestOrigin(r) + fileURL,
 		EmbedURL:    requestOrigin(r) + fileURL,
 		DownloadURL: fileURL + "/download-confirm",
 	})
+}
+
+func (a *App) publicR2ResourceURL(f myfiles.File) string {
+	if f.StorageProvider != "r2" || strings.TrimSpace(f.StorageFileID) == "" || !f.IsPublic || f.Status != "active" {
+		return ""
+	}
+	return storage.R2PublicURL(a.snapshotConfig().Storage, f.StorageFileID)
 }
 
 func shouldUseFaststartPreview(f myfiles.File) bool {
@@ -2238,23 +2956,26 @@ type previewLinks struct {
 func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File, embed bool, links previewLinks) {
 	kind := mediaKind(f.MIME, f.OriginalName)
 	contentType := effectiveFileMIME(f)
+	if isPDFFile(f.MIME, f.OriginalName) {
+		kind = "pdf"
+	}
 	if !isPreviewableMedia(f.MIME, f.OriginalName) {
 		kind = "file"
 	}
+	if isPDFFile(f.MIME, f.OriginalName) {
+		kind = "pdf"
+	}
 	origin := requestOrigin(r)
 	mediaURL := links.MediaURL
-	absMediaURL := origin + mediaURL
+	absMediaURL := absolutePreviewURL(origin, mediaURL)
 	previewURL := links.PreviewURL
 	embedURL := links.EmbedURL
 	title := f.OriginalName
 	if title == "" {
 		title = f.ID
 	}
-	description := fmt.Sprintf("%s · %s", contentType, formatBytes(f.Size))
-	ogDescription := description
-	if kind != "file" {
-		ogDescription = title
-	}
+	description := title
+	ogDescription := title
 	robots := "index,follow"
 	if f.RequireConfirm {
 		robots = "noindex,nofollow"
@@ -2278,23 +2999,34 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 	case "video":
 		poster := strings.TrimSpace(r.URL.Query().Get("poster"))
 		if poster == "" {
-			poster = publicOGImagePath(f.ID, f.OriginalName)
+			poster = a.previewPosterURL(f)
 		}
 		posterAttr := ""
 		if poster != "" {
 			posterAttr = fmt.Sprintf(` poster="%s"`, html.EscapeString(poster))
 		}
-		fmt.Fprintf(&media, `<div class="video-shell"><video data-caption-media data-audio-track-media controls playsinline preload="metadata"%s><source src="%s" type="%s"></video><div class="caption-overlay" data-caption-live aria-live="polite"></div></div><div class="native-audio-tools" data-native-audio-tools><label for="native-audio-track">音轨</label><select id="native-audio-track" data-native-audio-select><option value="">原生音轨</option></select></div>%s`, posterAttr, html.EscapeString(mediaURL), html.EscapeString(contentType), captionControls())
+		fmt.Fprintf(&media, `<div class="video-shell"><video controls playsinline preload="metadata"%s><source src="%s" type="%s"></video></div>`, posterAttr, html.EscapeString(mediaURL), html.EscapeString(contentType))
 	case "audio":
-		fmt.Fprintf(&media, `<div class="audio-card"><div class="audio-art">%s</div><strong>%s</strong><audio data-caption-media controls preload="metadata"><source src="%s" type="%s"></audio><div class="caption-panel" data-caption-live aria-live="polite"></div>%s</div>`, html.EscapeString(fileIcon(f.MIME, f.OriginalName)), html.EscapeString(title), html.EscapeString(mediaURL), html.EscapeString(contentType), captionControls())
+		coverURL := a.previewPosterURL(f)
+		fmt.Fprintf(&media, `<div class="audio-card"><img class="audio-cover" src="%s" alt=""><div class="audio-meta"><strong>%s</strong></div><audio controls preload="metadata"><source src="%s" type="%s"></audio></div>`, html.EscapeString(coverURL), html.EscapeString(title), html.EscapeString(mediaURL), html.EscapeString(contentType))
+	case "pdf":
+		pdfPreviewURL := mediaURL
+		if strings.HasPrefix(pdfPreviewURL, "/") {
+			if strings.Contains(pdfPreviewURL, "?") {
+				pdfPreviewURL += "&preview=1"
+			} else {
+				pdfPreviewURL += "?preview=1"
+			}
+		}
+		fmt.Fprintf(&media, `<section class="pdf-shell"><iframe src="%s" title="%s"></iframe><div class="pdf-fallback"><strong>%s</strong><a class="download-primary" href="%s">打开原始文档</a></div></section>`, html.EscapeString(pdfPreviewURL), html.EscapeString(title), html.EscapeString(title), html.EscapeString(mediaURL))
 	default:
 		downloadText := "Download after safety check"
-		message := "This file cannot be previewed online. Confirm the source is trustworthy and the file is safe before downloading."
+		message := "Confirm the source is trustworthy before downloading."
 		if strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "zh") {
 			downloadText = "确认安全后下载"
-			message = "该文件无法在线预览。请确认文件来源可信、安全后再下载查看。"
+			message = "下载前请确认文件来源可信。"
 		}
-		fmt.Fprintf(&media, `<section class="file-card"><span class="file-icon">%s</span><h2>%s</h2><p>%s</p><dl><div><dt>MIME</dt><dd>%s</dd></div><div><dt>Size</dt><dd>%s</dd></div></dl><form method="post" action="%s"><button class="download-primary" type="submit">%s</button></form></section>`, html.EscapeString(fileIcon(f.MIME, f.OriginalName)), html.EscapeString(title), html.EscapeString(message), html.EscapeString(contentType), html.EscapeString(formatBytes(f.Size)), html.EscapeString(links.DownloadURL), html.EscapeString(downloadText))
+		fmt.Fprintf(&media, `<section class="file-card"><div class="file-heading"><span class="file-icon">%s</span><h2>%s</h2></div><p>%s</p><form method="post" action="%s"><button class="download-primary" type="submit">%s</button></form></section>`, fileIconHTML(f.MIME, f.OriginalName), html.EscapeString(title), html.EscapeString(message), html.EscapeString(links.DownloadURL), html.EscapeString(downloadText))
 	}
 
 	var extraMeta strings.Builder
@@ -2304,7 +3036,7 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 <meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(absMediaURL))
 	}
 	if kind == "video" && embedURL != "" {
-		ogImage := origin + publicOGImagePath(f.ID, f.OriginalName)
+		ogImage := absolutePreviewURL(origin, a.previewPosterURL(f))
 		if poster := strings.TrimSpace(r.URL.Query().Get("poster")); poster != "" {
 			if strings.HasPrefix(poster, "https://") || strings.HasPrefix(poster, "http://") {
 				ogImage = poster
@@ -2323,12 +3055,15 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 <meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(absMediaURL), html.EscapeString(contentType), html.EscapeString(ogImage), html.EscapeString(embedURL), html.EscapeString(ogImage))
 	}
 	if kind == "audio" {
-		ogImage := origin + publicOGImagePath(f.ID, f.OriginalName)
-		fmt.Fprintf(&extraMeta, `<meta property="og:audio" content="%s">
+		ogImage := absolutePreviewURL(origin, a.previewPosterURL(f))
+		if kind == "audio" {
+			fmt.Fprintf(&extraMeta, `<meta property="og:audio" content="%s">
 <meta property="og:audio:type" content="%s">
-<meta property="og:image" content="%s">
+`, html.EscapeString(absMediaURL), html.EscapeString(contentType))
+		}
+		fmt.Fprintf(&extraMeta, `<meta property="og:image" content="%s">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="%s">`, html.EscapeString(absMediaURL), html.EscapeString(contentType), html.EscapeString(ogImage), html.EscapeString(ogImage))
+<meta name="twitter:image" content="%s">`, html.EscapeString(ogImage), html.EscapeString(ogImage))
 	}
 
 	bodyClass := "preview"
@@ -2336,18 +3071,14 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 		bodyClass = "embed"
 	}
 	chrome := ""
-	if !embed {
-		chrome = fmt.Sprintf(`<header><div><h1>%s</h1></div></header>`, html.EscapeString(title))
-	}
 	stylesheets := ""
 	if kind == "image" {
 		stylesheets += `<link rel="stylesheet" href="/vendor/photoswipe/photoswipe.css">`
 	}
-	scripts := previewEnhancementScript(kind, previewSubtitleURL(r))
+	scripts := previewEnhancementScript(kind)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Vary", "Accept, Range, User-Agent")
+	setPreviewPageCacheHeaders(w, r, f, embed)
 	fmt.Fprintf(w, `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2357,6 +3088,7 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 <title>%s</title>
 <meta name="description" content="%s">
 <link rel="canonical" href="%s">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png">
 <meta property="og:type" content="%s">
 <meta property="og:title" content="%s">
 <meta property="og:description" content="%s">
@@ -2366,7 +3098,7 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 %s
 %s
 <style>
-*{box-sizing:border-box}html,body{margin:0;min-height:100%%;background:#0f1115;color:#f7f3e8;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body.preview{min-height:100vh;display:grid;grid-template-rows:auto 1fr;background:#11151b}header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 24px;border-bottom:1px solid rgba(255,255,255,.12);background:#171c23}header div{min-width:0}span{display:block;color:#9eb5c7;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}h1{margin:0 0 4px;font-size:clamp(20px,3vw,34px);line-height:1.15;overflow-wrap:anywhere}h2{margin:0;font-size:22px;line-height:1.2;overflow-wrap:anywhere}p{margin:0;color:#bec8d2;font-size:14px}form{margin:0}a,button{border:1px solid rgba(255,255,255,.28);border-radius:6px;color:#f7f3e8;background:transparent;text-decoration:none;padding:9px 12px;font:inherit;font-weight:800;cursor:pointer}.stage{width:100%%;min-height:0;display:grid;place-items:center;gap:14px;padding:20px;contain:layout paint}.embed .stage{height:100vh;padding:0}.pswp-gallery{width:100%%;display:grid;place-items:center}.pswp-gallery a{display:block;border:0;padding:0;line-height:0}.pswp-gallery img{display:block;max-width:100%%;max-height:calc(100vh - 132px);object-fit:contain;background:#06080b}.video-shell{position:relative;width:min(100%%,1280px);contain:layout paint}.video-shell video{display:block;width:100%%;max-height:calc(100vh - 188px);aspect-ratio:16/9;object-fit:contain;background:#06080b;border-radius:8px}.embed .video-shell,.embed video{width:100%%;height:100vh;max-height:none;border-radius:0}.caption-overlay{position:absolute;left:50%%;bottom:18px;transform:translateX(-50%%);max-width:min(92%%,980px);padding:7px 12px;border-radius:6px;background:rgba(0,0,0,.68);color:#fff;font-size:clamp(16px,2vw,24px);line-height:1.35;text-align:center;white-space:pre-wrap;pointer-events:none}.caption-overlay:empty{display:none}.caption-tools,.native-audio-tools{width:min(100%%,720px);display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px}.native-audio-tools{grid-template-columns:auto minmax(0,1fr);align-items:center}.native-audio-tools label{color:#9eb5c7;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.native-audio-tools select,.caption-tools input[type=url],.caption-tools input[type=file]{min-width:0;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:#10151b;color:#f7f3e8;padding:9px 10px;font:inherit}.caption-file{display:grid;place-items:center;border:1px solid rgba(255,255,255,.28);border-radius:6px;padding:0 12px;font-weight:800;cursor:pointer}.caption-file input{position:absolute;inline-size:1px;block-size:1px;opacity:0}.audio-card,.file-card{width:min(720px,calc(100%% - 32px));display:grid;gap:16px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#171c23;padding:20px}.audio-art{width:92px;height:92px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.22);border-radius:8px;background:#222b35;color:#ffd44d;font-size:32px;font-weight:900}.audio-card strong{overflow-wrap:anywhere}.audio-card audio{width:100%%}.caption-panel{min-height:58px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:#10151b;color:#f7f3e8;padding:12px;text-align:center;white-space:pre-wrap;line-height:1.45}.caption-panel:empty{display:none}.file-icon{width:64px;height:64px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.24);border-radius:8px;background:#222b35;color:#ffd44d;font-size:24px;font-weight:900}.file-card dl{display:grid;gap:8px;margin:0}.file-card div{display:grid;grid-template-columns:72px minmax(0,1fr);gap:10px}.file-card dt{color:#9eb5c7;font-weight:800}.file-card dd{margin:0;overflow-wrap:anywhere}.download-primary{width:max-content;background:#ffd44d;color:#15120a;border-color:#ffd44d}@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.stage{padding:12px}.pswp-gallery img,.video-shell video{max-height:calc(100vh - 210px)}.caption-tools{grid-template-columns:1fr 1fr}.caption-tools input[type=url]{grid-column:1/-1}.native-audio-tools{grid-template-columns:1fr}}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%%;background:#f6f8fb;color:#172033;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body.preview{min-height:100vh;min-height:100svh;background:#f6f8fb}h2{margin:0;font-size:22px;line-height:1.2;overflow-wrap:anywhere}p{margin:0;color:#526176;font-size:14px}form{margin:0}a,button{border:1px solid #c3cede;border-radius:6px;color:#172033;background:#fff;text-decoration:none;padding:9px 12px;font:inherit;font-weight:800;cursor:pointer}.stage{width:100%%;min-height:100vh;min-height:100svh;display:grid;align-content:start;justify-items:center;gap:14px;padding:20px;contain:layout paint}.embed .stage{height:100vh;height:100svh;min-height:0;padding:0;background:#000}.pswp-gallery{width:100%%;display:grid;place-items:center}.pswp-gallery a{display:block;border:0;padding:0;line-height:0}.pswp-gallery img{display:block;max-width:100%%;max-height:calc(100vh - 40px);max-height:calc(100svh - 40px);object-fit:contain;background:#fff;border:1px solid #d8e0ea;border-radius:8px}.video-shell{position:relative;width:min(100%%,1360px);contain:layout paint}.video-shell video{display:block;width:100%%;max-height:calc(100vh - 40px);max-height:calc(100svh - 40px);aspect-ratio:16/9;object-fit:contain;background:#000;border-radius:8px}.embed .video-shell,.embed video{width:100%%;height:100vh;height:100svh;max-height:none;border-radius:0}.pdf-shell{position:relative;width:min(100%%,1320px);height:calc(100vh - 40px);height:calc(100svh - 40px);min-height:560px;border:1px solid #d8e0ea;border-radius:8px;background:#fff;overflow:hidden;box-shadow:0 16px 40px rgba(22,32,51,.08)}.pdf-shell iframe{display:block;width:100%%;height:100%%;border:0;background:#fff}.pdf-fallback{position:absolute;inset:auto 12px 12px 12px;display:none;gap:10px;align-items:center;justify-content:space-between;padding:10px;border:1px solid #d8e0ea;border-radius:8px;background:rgba(255,255,255,.94)}.audio-card,.file-card{width:min(920px,calc(100%% - 32px));display:grid;gap:16px;border:1px solid #d8e0ea;border-radius:8px;background:#fff;padding:22px;box-shadow:0 16px 40px rgba(22,32,51,.08)}.audio-card{grid-template-columns:168px minmax(0,1fr);align-items:center;margin-top:min(7vh,52px)}.audio-cover{width:100%%;aspect-ratio:1;border:1px solid #d8e0ea;border-radius:8px;background:#edf2f7;object-fit:cover}.audio-meta{min-width:0}.audio-card strong{display:block;font-size:24px;line-height:1.25;overflow-wrap:anywhere}.audio-card audio{grid-column:1/-1;width:100%%}.file-card{margin-top:min(7vh,52px)}.file-heading{display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px;align-items:center}.file-icon{width:64px;height:64px;display:grid;place-items:center;border:1px solid #c3cede;border-radius:8px;background:#edf2f7}.file-icon img{display:block;width:34px;height:34px}.download-primary{width:max-content;background:#ffd44d;color:#15120a;border-color:#d7a900}@media(max-width:720px){.stage{padding:10px;gap:10px;align-content:start}.pswp-gallery img{max-height:calc(100vh - 20px);max-height:calc(100svh - 20px);border-radius:6px}.video-shell video{max-height:calc(100vh - 20px);max-height:calc(100svh - 20px);border-radius:6px}.pdf-shell{width:100%%;height:calc(100vh - 20px);height:calc(100svh - 20px);min-height:0;border-radius:6px}.pdf-fallback{display:flex}.audio-card{width:100%%;grid-template-columns:88px minmax(0,1fr);gap:12px;align-content:start;margin-top:0;padding:12px;border-radius:7px}.audio-cover{width:88px}.audio-card strong{font-size:17px;line-height:1.28;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.audio-card audio{grid-column:1/-1;height:42px}.file-card{width:100%%;margin-top:0;padding:14px;gap:12px}.file-heading{gap:10px}.file-icon{width:48px;height:48px}.file-icon img{width:28px;height:28px}.download-primary{width:100%%}}@media(max-width:420px){.stage{padding:8px}.audio-card{grid-template-columns:72px minmax(0,1fr);gap:10px;padding:10px}.audio-cover{width:72px}.audio-card strong{font-size:16px}.audio-card audio{height:40px}.file-card{padding:12px}.pdf-shell{height:calc(100vh - 16px);height:calc(100svh - 16px)}}
 </style>
 </head>
 <body class="%s">
@@ -2377,6 +3109,41 @@ func (a *App) previewHTML(w http.ResponseWriter, r *http.Request, f myfiles.File
 </html>`, html.EscapeString(robots), html.EscapeString(title), html.EscapeString(description), html.EscapeString(previewURL), html.EscapeString(ogType), html.EscapeString(title), html.EscapeString(ogDescription), html.EscapeString(previewURL), html.EscapeString(title), html.EscapeString(ogDescription), extraMeta.String(), stylesheets, html.EscapeString(bodyClass), chrome, media.String(), scripts)
 }
 
+func (a *App) previewPosterURL(f myfiles.File) string {
+	if f.StorageProvider == "r2" && strings.TrimSpace(f.ThumbnailFileID) != "" {
+		if u := storage.R2PublicURL(a.snapshotConfig().Storage, f.ThumbnailFileID); u != "" {
+			return u
+		}
+	}
+	return publicOGImagePath(f.ID, f.OriginalName) + "?v=" + url.QueryEscape(f.UpdatedAt)
+}
+
+func absolutePreviewURL(origin, value string) string {
+	if strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") {
+		return value
+	}
+	if strings.HasPrefix(value, "/") {
+		return origin + value
+	}
+	return origin + "/" + strings.TrimLeft(value, "/")
+}
+
+func setPreviewPageCacheHeaders(w http.ResponseWriter, r *http.Request, f myfiles.File, embed bool) {
+	if r.Method != http.MethodGet || embed || f.RequireConfirm || !f.IsPublic || f.Status != "active" || !strings.HasPrefix(r.URL.Path, "/files/") || strings.Contains(r.URL.Path, "/raw/") {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Vary", "Accept")
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=300, s-maxage=1800, stale-while-revalidate=86400")
+	w.Header().Set("Vary", "Accept")
+	if etag := fileEntityTag(f); etag != "" {
+		w.Header().Set("ETag", strconv.Quote("preview-"+strings.Trim(etag, `"`)))
+	}
+	if t, err := time.Parse(time.RFC3339, f.UpdatedAt); err == nil {
+		w.Header().Set("Last-Modified", t.UTC().Format(http.TimeFormat))
+	}
+}
+
 func imagePreviewSize(f myfiles.File) (int, int) {
 	if f.ImageWidth != nil && f.ImageHeight != nil && *f.ImageWidth > 0 && *f.ImageHeight > 0 {
 		return *f.ImageWidth, *f.ImageHeight
@@ -2384,23 +3151,11 @@ func imagePreviewSize(f myfiles.File) (int, int) {
 	return 1200, 800
 }
 
-func captionControls() string {
-	return `<div class="caption-tools"><input id="caption-url" name="subtitle" data-caption-url type="url" inputmode="url" placeholder="字幕 URL"><button data-caption-load type="button">加载</button><label class="caption-file" for="caption-file-input">文件<input id="caption-file-input" name="caption_file" data-caption-file type="file" accept=".vtt,.srt,.lrc,text/vtt,application/x-subrip,text/plain"></label></div>`
-}
-
-func previewSubtitleURL(r *http.Request) string {
-	for _, key := range []string{"subtitle", "sub", "caption", "captions"} {
-		if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-			return v
-		}
+func previewEnhancementScript(kind string) string {
+	if kind != "image" {
+		return ""
 	}
-	return ""
-}
-
-func previewEnhancementScript(kind, subtitleURL string) string {
-	switch kind {
-	case "image":
-		return `<script type="module">
+	return `<script type="module">
 import PhotoSwipeLightbox from "/vendor/photoswipe/photoswipe-lightbox.esm.min.js";
 const lightbox = new PhotoSwipeLightbox({
   gallery: ".pswp-gallery",
@@ -2409,373 +3164,6 @@ const lightbox = new PhotoSwipeLightbox({
 });
 lightbox.init();
 </script>`
-	case "video", "audio":
-		encodedURL, _ := json.Marshal(subtitleURL)
-		return `<script>
-const initialSubtitleURL = ` + string(encodedURL) + `;
-let media = document.querySelector("[data-caption-media]");
-const live = document.querySelector("[data-caption-live]");
-const input = document.querySelector("[data-caption-url]");
-const loadButton = document.querySelector("[data-caption-load]");
-const fileInput = document.querySelector("[data-caption-file]");
-const nativeAudioTools = document.querySelector("[data-native-audio-tools]");
-const nativeAudioSelect = document.querySelector("[data-native-audio-select]");
-const bufferNative = document.querySelector("[data-buffer-native]");
-const bufferPrefetch = document.querySelector("[data-buffer-prefetch]");
-const bufferPlayed = document.querySelector("[data-buffer-played]");
-let cues = [];
-let activeIndex = -1;
-function toSeconds(raw) {
-  const value = raw.trim().replace(",", ".");
-  const parts = value.split(":").map(Number);
-  if (parts.some(Number.isNaN)) return NaN;
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  return parts[0];
-}
-function cleanCaptionText(text) {
-  return text.replace(/<[^>]+>/g, "").replace(/\r/g, "").trim();
-}
-function parseTimedText(text) {
-  const normalized = text.replace(/\ufeff/g, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const out = [];
-  if (/^\s*WEBVTT/i.test(normalized) || normalized.includes("-->")) {
-    for (const block of normalized.split(/\n{2,}/)) {
-      const lines = block.split("\n").filter(Boolean);
-      const timeLine = lines.findIndex((line) => line.includes("-->"));
-      if (timeLine < 0) continue;
-      const times = lines[timeLine].split("-->");
-      const start = toSeconds(times[0]);
-      const end = toSeconds(times[1].split(/\s+/)[0]);
-      const caption = cleanCaptionText(lines.slice(timeLine + 1).join("\n"));
-      if (Number.isFinite(start) && Number.isFinite(end) && caption) out.push({ start, end, text: caption });
-    }
-  } else {
-    for (const line of normalized.split("\n")) {
-      const matches = [...line.matchAll(/\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]/g)];
-      if (!matches.length) continue;
-      const caption = cleanCaptionText(line.replace(/\[[^\]]+\]/g, ""));
-      if (!caption) continue;
-      for (const match of matches) {
-        const start = toSeconds(match[1]);
-        if (Number.isFinite(start)) out.push({ start, end: start + 5, text: caption });
-      }
-    }
-  }
-  out.sort((a, b) => a.start - b.start);
-  for (let i = 0; i < out.length; i += 1) {
-    if (!Number.isFinite(out[i].end) || out[i].end <= out[i].start) {
-      out[i].end = i + 1 < out.length ? out[i + 1].start : out[i].start + 5;
-    }
-  }
-  return out;
-}
-function setStatus(message) {
-  if (live) live.textContent = message || "";
-}
-function activateCues(next) {
-  cues = next;
-  activeIndex = -1;
-  setStatus(cues.length ? "" : "未识别到字幕");
-  updateCaption();
-}
-async function loadCaptionURL(url) {
-  if (!url) return;
-  setStatus("字幕加载中");
-  const response = await fetch(url, { credentials: "same-origin" });
-  if (!response.ok) throw new Error("HTTP " + response.status);
-  activateCues(parseTimedText(await response.text()));
-}
-function updateCaption() {
-  if (!media || !live || cues.length === 0) return;
-  const now = media.currentTime;
-  const index = cues.findIndex((cue) => now >= cue.start && now <= cue.end);
-  if (index === activeIndex) return;
-  activeIndex = index;
-  live.textContent = index >= 0 ? cues[index].text : "";
-}
-if (input && initialSubtitleURL) input.value = initialSubtitleURL;
-if (loadButton) {
-  loadButton.addEventListener("click", () => {
-    loadCaptionURL(input ? input.value.trim() : "").catch(() => setStatus("字幕加载失败"));
-  });
-}
-if (fileInput) {
-  fileInput.addEventListener("change", () => {
-    const file = fileInput.files && fileInput.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => activateCues(parseTimedText(String(reader.result || "")));
-    reader.onerror = () => setStatus("字幕加载失败");
-    reader.readAsText(file);
-  });
-}
-function audioTrackLabel(track, index) {
-  return track.label || track.language || (index === 0 ? "原生音轨" : "音轨 " + (index + 1));
-}
-function setupNativeAudioTracks() {
-  if (!media || !nativeAudioTools || !nativeAudioSelect) return;
-  const tracks = media.audioTracks;
-  function renderTracks() {
-    nativeAudioSelect.textContent = "";
-    if (!tracks || typeof tracks.length !== "number" || tracks.length === 0) {
-      nativeAudioSelect.add(new Option("原生音轨", ""));
-      nativeAudioSelect.disabled = true;
-      return;
-    }
-    nativeAudioSelect.disabled = false;
-    let selected = 0;
-    for (let i = 0; i < tracks.length; i += 1) {
-      const track = tracks[i];
-      if (track.enabled) selected = i;
-      nativeAudioSelect.add(new Option(audioTrackLabel(track, i), String(i)));
-    }
-    nativeAudioSelect.value = String(selected);
-  }
-  function selectTrack() {
-    if (!tracks || typeof tracks.length !== "number" || tracks.length === 0) return;
-    const selected = Number(nativeAudioSelect.value);
-    for (let i = 0; i < tracks.length; i += 1) {
-      tracks[i].enabled = i === selected;
-    }
-  }
-  nativeAudioSelect.addEventListener("change", selectTrack);
-  if (tracks && typeof tracks.addEventListener === "function") {
-    tracks.addEventListener("addtrack", renderTracks);
-    tracks.addEventListener("removetrack", renderTracks);
-    tracks.addEventListener("change", renderTracks);
-  }
-  renderTracks();
-}
-function bindMediaControls(boundMedia, manageBuffer) {
-  if (!boundMedia || boundMedia.dataset.captionBound === "1") return;
-  media = boundMedia;
-  media.dataset.captionBound = "1";
-  media.addEventListener("timeupdate", updateCaption);
-  media.addEventListener("seeked", updateCaption);
-  if (!manageBuffer) return;
-  let shouldResumeAfterBuffer = false;
-  let lastPlayRequestAt = 0;
-  let resumeTimer = 0;
-  const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-  const prefetchSrc = media.dataset.bufferPrefetchSrc || "";
-  const prefetchSize = Number(media.dataset.bufferPrefetchSize || "0");
-  let prefetching = false;
-  let prefetchTimer = 0;
-  let nextPrefetchByte = 0;
-  let confirmedPrefetchByte = 0;
-  function bufferedAhead() {
-    const ranges = media.buffered;
-    const current = media.currentTime;
-    for (let i = 0; i < ranges.length; i += 1) {
-      if (ranges.start(i) <= current + 0.25 && ranges.end(i) > current) {
-        return ranges.end(i) - current;
-      }
-    }
-    return 0;
-  }
-  function nativeBufferedEnd() {
-    let end = 0;
-    for (let i = 0; i < media.buffered.length; i += 1) {
-      if (media.buffered.end(i) > end) end = media.buffered.end(i);
-    }
-    return end;
-  }
-  function playbackRate() {
-    return Math.max(0.25, Math.abs(media.playbackRate || 1));
-  }
-  function bufferPlanningRate() {
-    return playbackRate();
-  }
-  function highRateBufferMultiplier(rate) {
-    if (rate >= 2) return 1.75;
-    if (rate >= 1.5) return 1.45;
-    if (rate > 1) return 1.2 + (rate - 1) * 0.5;
-    return 1;
-  }
-  function resumeThresholdSeconds() {
-    const rate = bufferPlanningRate();
-    let seconds = 4;
-    if (connection) {
-      const type = String(connection.effectiveType || "");
-      if (type === "slow-2g" || type === "2g") seconds = 12;
-      else if (type === "3g") seconds = 8;
-      else if (type === "4g") seconds = 4;
-      const downlink = Number(connection.downlink);
-      if (Number.isFinite(downlink) && downlink > 0) {
-        if (downlink < 0.8) seconds = Math.max(seconds, 12);
-        else if (downlink < 1.5) seconds = Math.max(seconds, 8);
-        else if (downlink < 3) seconds = Math.max(seconds, 5);
-      }
-      const rtt = Number(connection.rtt);
-      if (Number.isFinite(rtt) && rtt > 600) seconds += 2;
-    }
-    if (rate > 1) {
-      seconds = Math.max(seconds, 6 + (rate - 1) * 4);
-    }
-    return Math.min(45, Math.max(2.5, seconds * rate * highRateBufferMultiplier(rate)));
-  }
-  function canResumePlayback() {
-    if (!shouldResumeAfterBuffer || media.ended || media.seeking) return false;
-    const threshold = resumeThresholdSeconds();
-    const rate = bufferPlanningRate();
-    const ahead = bufferedAhead();
-    if (media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && ahead >= Math.max(0.35, 0.75 * rate)) {
-      return true;
-    }
-    if (prefetchedAhead() >= Math.max(2.5, 2 * rate)) {
-      return true;
-    }
-    return ahead >= threshold;
-  }
-  function prefetchedAhead() {
-    if (!prefetchSize || !Number.isFinite(media.duration) || media.duration <= 0) return 0;
-    const bytesPerSecond = prefetchSize / media.duration;
-    if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return 0;
-    const currentByte = Math.max(0, Math.floor(media.currentTime * bytesPerSecond));
-    return Math.max(0, (confirmedPrefetchByte - currentByte) / bytesPerSecond);
-  }
-  function confirmedPrefetchEndTime() {
-    if (!prefetchSize || !Number.isFinite(media.duration) || media.duration <= 0) return 0;
-    return Math.min(media.duration, (confirmedPrefetchByte / prefetchSize) * media.duration);
-  }
-  function setMeterWidth(element, seconds) {
-    if (!element || !Number.isFinite(media.duration) || media.duration <= 0) return;
-    element.style.width = Math.max(0, Math.min(100, (seconds / media.duration) * 100)) + "%";
-  }
-  function updateBufferMeter() {
-    setMeterWidth(bufferNative, nativeBufferedEnd());
-    setMeterWidth(bufferPrefetch, Math.max(nativeBufferedEnd(), confirmedPrefetchEndTime()));
-    setMeterWidth(bufferPlayed, media.currentTime || 0);
-  }
-  function prefetchTargetSeconds() {
-    const rate = bufferPlanningRate();
-    let seconds = rate > 1 ? 18 * rate : 10;
-    if (connection) {
-      const downlink = Number(connection.downlink);
-      if (Number.isFinite(downlink) && downlink > 0 && downlink < 1.5) seconds = Math.min(seconds, 24);
-    }
-    return Math.min(90, seconds);
-  }
-  function shouldPrefetchAhead() {
-    if (!prefetchSrc || !prefetchSize || !Number.isFinite(media.duration) || media.duration <= 0 || media.ended) return false;
-    const rate = bufferPlanningRate();
-    return rate > 1.01 || shouldResumeAfterBuffer || bufferedAhead() < Math.min(8, resumeThresholdSeconds());
-  }
-  function schedulePrefetchAhead(delay) {
-    window.clearTimeout(prefetchTimer);
-    if (!shouldPrefetchAhead()) return;
-    prefetchTimer = window.setTimeout(prefetchAhead, delay || 0);
-  }
-  async function prefetchAhead() {
-    if (prefetching || !shouldPrefetchAhead()) return;
-    const bytesPerSecond = prefetchSize / media.duration;
-    if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return;
-    const currentByte = Math.max(0, Math.floor(media.currentTime * bytesPerSecond));
-    if (nextPrefetchByte < currentByte || media.seeking) nextPrefetchByte = currentByte;
-    const start = Math.max(nextPrefetchByte, Math.floor((media.currentTime + Math.min(bufferedAhead() + 2, 18)) * bytesPerSecond));
-    const target = Math.min(prefetchSize - 1, Math.floor((media.currentTime + prefetchTargetSeconds()) * bytesPerSecond));
-    if (start >= target) return;
-    const chunkSeconds = bufferPlanningRate() >= 2 ? 18 : bufferPlanningRate() >= 1.5 ? 12 : 8;
-    const chunkSize = Math.max(384 * 1024, Math.ceil(bytesPerSecond * chunkSeconds * bufferPlanningRate()));
-    const end = Math.min(target, start + chunkSize - 1);
-    prefetching = true;
-    try {
-      const response = await fetch(prefetchSrc, {
-        headers: { Range: "bytes=" + start + "-" + end },
-        credentials: "same-origin",
-        cache: "force-cache"
-      });
-      if (response.ok || response.status === 206) {
-        await response.arrayBuffer();
-        nextPrefetchByte = end + 1;
-        confirmedPrefetchByte = Math.max(confirmedPrefetchByte, end + 1);
-        updateBufferMeter();
-      }
-    } catch (_) {
-      nextPrefetchByte = Math.min(prefetchSize - 1, end + 1);
-    } finally {
-      prefetching = false;
-      if (!media.paused || shouldResumeAfterBuffer) schedulePrefetchAhead(650);
-    }
-  }
-  function tryResumePlayback() {
-    window.clearTimeout(resumeTimer);
-    if (!canResumePlayback()) return;
-    const playResult = media.play();
-    if (playResult && typeof playResult.catch === "function") {
-      playResult.catch(() => {});
-    }
-  }
-  function scheduleResumeCheck() {
-    tryResumePlayback();
-    if (shouldResumeAfterBuffer && media.paused && !media.ended) {
-      resumeTimer = window.setTimeout(scheduleResumeCheck, 500);
-    }
-  }
-  media.addEventListener("play", () => {
-    lastPlayRequestAt = Date.now();
-    media.preload = "auto";
-    schedulePrefetchAhead(0);
-    updateBufferMeter();
-    shouldResumeAfterBuffer = false;
-  });
-  media.addEventListener("pause", () => {
-    if (Date.now() - lastPlayRequestAt > 900 && !media.seeking && !media.ended && bufferedAhead() > 0.5) {
-      shouldResumeAfterBuffer = false;
-    } else if (shouldResumeAfterBuffer && !media.ended) {
-      scheduleResumeCheck();
-    }
-  });
-  media.addEventListener("waiting", () => {
-    shouldResumeAfterBuffer = true;
-    schedulePrefetchAhead(0);
-    scheduleResumeCheck();
-  });
-  media.addEventListener("stalled", () => {
-    if (!media.paused || shouldResumeAfterBuffer) {
-      shouldResumeAfterBuffer = true;
-      schedulePrefetchAhead(0);
-      scheduleResumeCheck();
-    }
-  });
-  media.addEventListener("progress", () => {
-    updateBufferMeter();
-    schedulePrefetchAhead(250);
-    scheduleResumeCheck();
-  });
-  media.addEventListener("canplay", () => {
-    updateBufferMeter();
-    schedulePrefetchAhead(250);
-    scheduleResumeCheck();
-  });
-  media.addEventListener("canplaythrough", scheduleResumeCheck);
-  media.addEventListener("timeupdate", updateBufferMeter);
-  media.addEventListener("seeked", () => {
-    nextPrefetchByte = 0;
-    confirmedPrefetchByte = 0;
-    updateBufferMeter();
-    schedulePrefetchAhead(0);
-  });
-  media.addEventListener("ratechange", () => {
-    media.preload = "auto";
-    schedulePrefetchAhead(0);
-    scheduleResumeCheck();
-  });
-  updateBufferMeter();
-  if (media.readyState >= HTMLMediaElement.HAVE_METADATA) schedulePrefetchAhead(300);
-  else media.addEventListener("loadedmetadata", () => {
-    updateBufferMeter();
-    schedulePrefetchAhead(300);
-  }, { once: true });
-}
-bindMediaControls(media, true);
-setupNativeAudioTracks();
-if (initialSubtitleURL) loadCaptionURL(initialSubtitleURL).catch(() => setStatus("字幕加载失败"));
-</script>`
-	default:
-		return ""
-	}
 }
 
 func publicOGImagePath(id, name string) string {
@@ -2795,12 +3183,24 @@ func (a *App) handlePublicOGImage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if mediaKind(f.MIME, f.OriginalName) == "video" {
-		poster, err := a.videoPosterPath(r.Context(), f)
+	if mediaKind(f.MIME, f.OriginalName) == "video" || mediaKind(f.MIME, f.OriginalName) == "audio" {
+		poster, err := a.mediaPosterPath(r.Context(), f)
 		if err == nil {
 			w.Header().Set("Content-Type", "image/jpeg")
 			w.Header().Set("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800")
 			http.ServeFile(w, r, poster)
+			return
+		}
+		if mediaKind(f.MIME, f.OriginalName) == "audio" {
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800")
+			_ = png.Encode(w, defaultAudioCover())
+			return
+		}
+		if mediaKind(f.MIME, f.OriginalName) == "video" {
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
+			_ = png.Encode(w, defaultVideoCover())
 			return
 		}
 	}
@@ -2810,15 +3210,27 @@ func (a *App) handlePublicOGImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) videoPosterPath(ctx context.Context, f myfiles.File) (string, error) {
+	return a.mediaPosterPath(ctx, f)
+}
+
+func (a *App) mediaPosterPath(ctx context.Context, f myfiles.File) (string, error) {
 	cacheDir := filepath.Join(a.cfg.App.DataDir, "cache", "posters")
 	if err := os.MkdirAll(cacheDir, 0750); err != nil {
 		return "", err
 	}
 	posterPath := filepath.Join(cacheDir, f.ID+".jpg")
 	if info, err := os.Stat(posterPath); err == nil && info.Size() > 0 && posterLooksUsable(posterPath) {
+		a.syncPosterToR2(ctx, f, posterPath)
 		return posterPath, nil
 	}
 	_ = os.Remove(posterPath)
+	if r2Poster, err := a.downloadR2Poster(ctx, cacheDir, f); err == nil && posterLooksUsable(r2Poster) {
+		if err := os.Rename(r2Poster, posterPath); err != nil {
+			_ = os.Remove(r2Poster)
+			return "", err
+		}
+		return posterPath, nil
+	}
 	source := a.videoPosterSource(f)
 	if source == "" {
 		return "", fmt.Errorf("missing poster source")
@@ -2831,6 +3243,14 @@ func (a *App) videoPosterPath(ctx context.Context, f myfiles.File) (string, erro
 			_ = os.Remove(attached)
 			return "", err
 		}
+		a.syncPosterToR2(ctx, f, posterPath)
+		return posterPath, nil
+	}
+	if mediaKind(f.MIME, f.OriginalName) == "audio" {
+		if err := saveCoverJPEG(posterPath, defaultAudioCover()); err != nil {
+			return "", err
+		}
+		a.syncPosterToR2(ctx, f, posterPath)
 		return posterPath, nil
 	}
 	if frame, err := extractBestPosterFrame(ctx, cacheDir, f.ID, source); err == nil {
@@ -2838,9 +3258,101 @@ func (a *App) videoPosterPath(ctx context.Context, f myfiles.File) (string, erro
 			_ = os.Remove(frame)
 			return "", err
 		}
+		a.syncPosterToR2(ctx, f, posterPath)
 		return posterPath, nil
 	}
-	return "", fmt.Errorf("no usable poster")
+	if err := saveCoverJPEG(posterPath, defaultVideoCover()); err != nil {
+		return "", err
+	}
+	a.syncPosterToR2(ctx, f, posterPath)
+	return posterPath, nil
+}
+
+func (a *App) downloadR2Poster(ctx context.Context, cacheDir string, f myfiles.File) (string, error) {
+	if f.StorageProvider != "r2" || strings.TrimSpace(f.ThumbnailFileID) == "" {
+		return "", fmt.Errorf("missing r2 poster key")
+	}
+	cfg := a.snapshotConfig()
+	req, err := storage.NewR2FetchRequest(ctx, cfg.Storage, f.ThumbnailFileID)
+	if err != nil {
+		return "", err
+	}
+	resp, err := storage.NewR2HTTPClient(cfg.Storage).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("r2 poster fetch failed: HTTP %d", resp.StatusCode)
+	}
+	tmpPath := filepath.Join(cacheDir, f.ID+"."+ids.New("r2poster")+".jpg")
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, io.LimitReader(resp.Body, 16<<20)); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	return tmpPath, nil
+}
+
+func (a *App) syncPosterToR2(ctx context.Context, f myfiles.File, posterPath string) {
+	if f.StorageProvider != "r2" || strings.TrimSpace(f.StorageFileID) == "" {
+		return
+	}
+	cfg := a.snapshotConfig()
+	key := strings.TrimSpace(f.ThumbnailFileID)
+	if key == "" {
+		key = r2PreviewObjectKey(cfg.Storage, f.ID)
+	}
+	content, err := os.ReadFile(posterPath)
+	if err != nil {
+		log.Printf("poster read failed: file=%s err=%v", f.ID, err)
+		return
+	}
+	sum := sha256.Sum256(content)
+	if err := storage.UploadR2Object(ctx, cfg.Storage, key, posterPath, "image/jpeg", f.ID, hex.EncodeToString(sum[:])); err != nil {
+		log.Printf("poster r2 upload failed: file=%s key=%q err=%v", f.ID, key, err)
+		return
+	}
+	if strings.TrimSpace(f.ThumbnailFileID) != key {
+		if err := myfiles.SetThumbnailFileID(a.db, f.ID, key); err != nil {
+			log.Printf("poster db update failed: file=%s key=%q err=%v", f.ID, key, err)
+		}
+	}
+}
+
+func r2PreviewObjectKey(cfg config.StorageConfig, fileID string) string {
+	rel := "files/_previews/" + filepath.Base(fileID) + ".jpg"
+	prefix := strings.Trim(strings.TrimSpace(cfg.R2Prefix), "/")
+	if prefix == "" {
+		return rel
+	}
+	return prefix + "/" + rel
+}
+
+func saveCoverJPEG(path string, img image.Image) error {
+	tmpPath := path + "." + ids.New("cover")
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	err = jpeg.Encode(out, img, &jpeg.Options{Quality: 88})
+	closeErr := out.Close()
+	if err != nil || closeErr != nil {
+		_ = os.Remove(tmpPath)
+		if err != nil {
+			return err
+		}
+		return closeErr
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func (a *App) downloadStoredThumbnail(ctx context.Context, cacheDir string, f myfiles.File) (string, error) {
@@ -2878,14 +3390,92 @@ func (a *App) downloadStoredThumbnail(ctx context.Context, cacheDir string, f my
 	return tmpPath, nil
 }
 
-func (a *App) extractAttachedPoster(ctx context.Context, cacheDir, id, source string) (string, error) {
-	tmpPath := filepath.Join(cacheDir, id+"."+ids.New("cover")+".jpg")
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", source, "-map", "0:v:m:attached_pic", "-frames:v", "1", tmpPath)
-	if err := cmd.Run(); err != nil {
-		_ = os.Remove(tmpPath)
+func (a *App) officeThumbnailPath(ctx context.Context, f myfiles.File) (string, error) {
+	cacheDir := filepath.Join(a.cfg.App.DataDir, "cache", "documents")
+	if err := os.MkdirAll(cacheDir, 0750); err != nil {
 		return "", err
 	}
-	return tmpPath, nil
+	for _, ext := range []string{".jpg", ".jpeg", ".png"} {
+		candidate := filepath.Join(cacheDir, f.ID+ext)
+		if info, err := os.Stat(candidate); err == nil && info.Size() > 0 {
+			return candidate, nil
+		}
+	}
+	source, cleanup, err := a.faststartInputPath(ctx, f)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	reader, err := zip.OpenReader(source)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+	for _, file := range reader.File {
+		name := strings.ToLower(file.Name)
+		if name != "docprops/thumbnail.jpeg" && name != "docprops/thumbnail.jpg" && name != "docprops/thumbnail.png" {
+			continue
+		}
+		in, err := file.Open()
+		if err != nil {
+			return "", err
+		}
+		ext := filepath.Ext(name)
+		if ext == ".jpeg" {
+			ext = ".jpg"
+		}
+		outPath := filepath.Join(cacheDir, f.ID+ext)
+		tmpPath := outPath + "." + ids.New("thumb")
+		out, err := os.Create(tmpPath)
+		if err != nil {
+			_ = in.Close()
+			return "", err
+		}
+		_, copyErr := io.Copy(out, io.LimitReader(in, 12<<20))
+		closeInErr := in.Close()
+		closeOutErr := out.Close()
+		if copyErr != nil || closeInErr != nil || closeOutErr != nil {
+			_ = os.Remove(tmpPath)
+			if copyErr != nil {
+				return "", copyErr
+			}
+			if closeInErr != nil {
+				return "", closeInErr
+			}
+			return "", closeOutErr
+		}
+		if err := os.Rename(tmpPath, outPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return "", err
+		}
+		return outPath, nil
+	}
+	return "", fmt.Errorf("office thumbnail not found")
+}
+
+func officeThumbnailContentType(path string) string {
+	if strings.EqualFold(filepath.Ext(path), ".png") {
+		return "image/png"
+	}
+	return "image/jpeg"
+}
+
+func (a *App) extractAttachedPoster(ctx context.Context, cacheDir, id, source string) (string, error) {
+	var lastErr error
+	for _, streamMap := range []string{"0:v:m:attached_pic", "0:v:0"} {
+		tmpPath := filepath.Join(cacheDir, id+"."+ids.New("cover")+".jpg")
+		cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", source, "-map", streamMap, "-frames:v", "1", tmpPath)
+		if err := cmd.Run(); err != nil {
+			_ = os.Remove(tmpPath)
+			lastErr = err
+			continue
+		}
+		return tmpPath, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no attached poster stream")
+	}
+	return "", lastErr
 }
 
 func extractBestPosterFrame(ctx context.Context, cacheDir, id, source string) (string, error) {
@@ -3025,6 +3615,13 @@ func (a *App) videoPosterSource(f myfiles.File) string {
 			return storage.FetchURL(cfg.Storage.UploadURL, cfg.Storage.APIKey, f.StorageFileID)
 		}
 	}
+	if f.StorageProvider == "r2" && f.StorageFileID != "" {
+		cfg := a.snapshotConfig()
+		if publicURL := storage.R2PublicURL(cfg.Storage, f.StorageFileID); publicURL != "" {
+			return publicURL
+		}
+		return storage.R2FetchURL(cfg.Storage, f.StorageFileID)
+	}
 	return strings.TrimSpace(f.StorageURL)
 }
 
@@ -3035,6 +3632,112 @@ func blankOGImage() image.Image {
 		img.Pix[i] = 255
 	}
 	return img
+}
+
+func defaultAudioCover() image.Image {
+	const width, height = 800, 800
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			t := float64(x+y) / float64(width+height)
+			r := uint8(32 + 34*t)
+			g := uint8(46 + 74*t)
+			b := uint8(64 + 92*t)
+			i := img.PixOffset(x, y)
+			img.Pix[i+0] = r
+			img.Pix[i+1] = g
+			img.Pix[i+2] = b
+			img.Pix[i+3] = 255
+		}
+	}
+	cx, cy := width/2, height/2
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			dx, dy := x-cx, y-cy
+			if dx*dx+dy*dy < 220*220 {
+				i := img.PixOffset(x, y)
+				img.Pix[i+0] = 245
+				img.Pix[i+1] = 249
+				img.Pix[i+2] = 255
+				img.Pix[i+3] = 255
+			}
+		}
+	}
+	for y := cy - 120; y < cy+90; y++ {
+		for x := cx - 28; x < cx+22; x++ {
+			setCoverPixel(img, x, y, 24, 32, 51)
+		}
+	}
+	for y := cy - 130; y < cy-80; y++ {
+		for x := cx - 20; x < cx+150; x++ {
+			setCoverPixel(img, x, y, 24, 32, 51)
+		}
+	}
+	for y := cy + 42; y < cy+142; y++ {
+		for x := cx + 78; x < cx+178; x++ {
+			dx, dy := x-(cx+128), y-(cy+92)
+			if dx*dx+dy*dy < 50*50 {
+				setCoverPixel(img, x, y, 24, 32, 51)
+			}
+		}
+	}
+	for y := cy + 62; y < cy+162; y++ {
+		for x := cx - 108; x < cx-8; x++ {
+			dx, dy := x-(cx-58), y-(cy+112)
+			if dx*dx+dy*dy < 50*50 {
+				setCoverPixel(img, x, y, 24, 32, 51)
+			}
+		}
+	}
+	return img
+}
+
+func defaultVideoCover() image.Image {
+	const width, height = 1280, 720
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			t := float64(y) / float64(height)
+			i := img.PixOffset(x, y)
+			img.Pix[i+0] = uint8(18 + 20*t)
+			img.Pix[i+1] = uint8(26 + 28*t)
+			img.Pix[i+2] = uint8(40 + 48*t)
+			img.Pix[i+3] = 255
+		}
+	}
+	cx, cy := width/2, height/2
+	for y := cy - 120; y < cy+120; y++ {
+		for x := cx - 120; x < cx+120; x++ {
+			dx, dy := x-cx, y-cy
+			if dx*dx+dy*dy < 120*120 {
+				setCoverPixel(img, x, y, 245, 249, 255)
+			}
+		}
+	}
+	for y := cy - 70; y < cy+70; y++ {
+		left := cx - 30
+		right := cx - 30 + (y - (cy - 70))
+		if y > cy {
+			right = cx - 30 + (cy + 70 - y)
+		}
+		for x := left; x < right+120; x++ {
+			if x >= left && x <= cx+85 && x-left < (y-(cy-70))*2+8 && x-left < ((cy+70)-y)*2+8 {
+				setCoverPixel(img, x, y, 24, 32, 51)
+			}
+		}
+	}
+	return img
+}
+
+func setCoverPixel(img *image.RGBA, x, y int, r, g, b uint8) {
+	if !image.Pt(x, y).In(img.Bounds()) {
+		return
+	}
+	i := img.PixOffset(x, y)
+	img.Pix[i+0] = r
+	img.Pix[i+1] = g
+	img.Pix[i+2] = b
+	img.Pix[i+3] = 255
 }
 
 func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles.File) {
@@ -3059,6 +3762,46 @@ func (a *App) streamTGBotsFile(w http.ResponseWriter, r *http.Request, f myfiles
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		writeError(w, resp.StatusCode, "storage_fetch_failed", "存储回源返回错误", nil)
+		return
+	}
+	w.Header().Set("Content-Type", effectiveFileMIME(f))
+	w.Header().Set("Content-Disposition", contentDisposition(r, f))
+	copyResponseHeader(w, resp, "Accept-Ranges")
+	copyResponseHeader(w, resp, "Content-Length")
+	copyResponseHeader(w, resp, "Content-Range")
+	copyResponseHeader(w, resp, "ETag")
+	copyResponseHeader(w, resp, "Last-Modified")
+	setStoredFileCacheHeaders(w, f, f.IsPublic)
+	status := resp.StatusCode
+	if status < 200 || status >= 400 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	if r.Method == http.MethodHead {
+		return
+	}
+	buf := make([]byte, 1024*1024)
+	_, _ = io.CopyBuffer(w, resp.Body, buf)
+}
+
+func (a *App) streamR2File(w http.ResponseWriter, r *http.Request, f myfiles.File) {
+	cfg := a.snapshotConfig()
+	req, err := storage.NewR2FetchRequest(r.Context(), cfg.Storage, f.StorageFileID)
+	if err != nil {
+		writeError(w, 500, "storage_fetch_failed", "创建 R2 回源请求失败", nil)
+		return
+	}
+	if r.Header.Get("Range") != "" {
+		req.Header.Set("Range", r.Header.Get("Range"))
+	}
+	resp, err := storage.NewR2HTTPClient(cfg.Storage).Do(req)
+	if err != nil {
+		writeError(w, 502, "storage_fetch_failed", "R2 回源失败", nil)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		writeError(w, resp.StatusCode, "storage_fetch_failed", "R2 回源返回错误", nil)
 		return
 	}
 	w.Header().Set("Content-Type", effectiveFileMIME(f))
@@ -3119,13 +3862,17 @@ func (a *App) handlePublicFileConfirm(w http.ResponseWriter, r *http.Request, id
 }
 
 func (a *App) handlePublicFileDownloadConfirm(w http.ResponseWriter, r *http.Request, id string) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
 		writeError(w, 405, "method_not_allowed", "method not allowed", nil)
 		return
 	}
 	f, err := myfiles.GetFile(a.db, id, false)
 	if err != nil || !f.IsPublic || f.Status != "active" {
 		http.NotFound(w, r)
+		return
+	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		a.renderDownloadConfirmPage(w, r, f, publicFilePath(f.ID, f.OriginalName), publicFilePath(f.ID, f.OriginalName)+"/download-confirm")
 		return
 	}
 	if isPreviewableMedia(f.MIME, f.OriginalName) {
@@ -3155,12 +3902,85 @@ func (a *App) handlePublicFileDownload(w http.ResponseWriter, r *http.Request, i
 		http.Redirect(w, r, publicFilePath(f.ID, f.OriginalName), http.StatusSeeOther)
 		return
 	}
-	a.clearDownloadConfirmation(w, r, name, "/files")
+	if a.redirectR2Download(w, r, f) {
+		return
+	}
 	a.serveStoredFile(w, r, f, true)
 }
 
+func (a *App) redirectR2Download(w http.ResponseWriter, r *http.Request, f myfiles.File) bool {
+	if f.StorageProvider != "r2" || strings.TrimSpace(f.StorageFileID) == "" {
+		return false
+	}
+	cfg := a.snapshotConfig()
+	url, err := storage.PresignR2ReadURL(cfg.Storage, r.Method, f.StorageFileID, effectiveFileMIME(f), downloadContentDisposition(f), 15*time.Minute)
+	if err != nil {
+		log.Printf("r2 presigned download failed: file=%s key=%q err=%v", f.ID, f.StorageFileID, err)
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, url, http.StatusFound)
+	return true
+}
+
+func (a *App) redirectR2StoredFile(w http.ResponseWriter, r *http.Request, f myfiles.File, publicCache bool) bool {
+	if f.StorageProvider != "r2" || strings.TrimSpace(f.StorageFileID) == "" {
+		return false
+	}
+	cfg := a.snapshotConfig()
+	if publicCache {
+		if publicURL := storage.R2PublicURL(cfg.Storage, f.StorageFileID); publicURL != "" {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, s-maxage=31536000, immutable")
+			if etag := fileEntityTag(f); etag != "" {
+				w.Header().Set("ETag", etag)
+			}
+			http.Redirect(w, r, publicURL, http.StatusTemporaryRedirect)
+			return true
+		}
+	}
+	if mediaKind(f.MIME, f.OriginalName) == "video" {
+		return false
+	}
+	url, err := storage.PresignR2ReadURL(cfg.Storage, r.Method, f.StorageFileID, effectiveFileMIME(f), contentDisposition(r, f), 15*time.Minute)
+	if err != nil {
+		log.Printf("r2 presigned resource failed: file=%s key=%q err=%v", f.ID, f.StorageFileID, err)
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+	return true
+}
+
 func (a *App) confirmDownload(w http.ResponseWriter, r *http.Request, name, path string) {
-	http.SetCookie(w, &http.Cookie{Name: name, Value: "1", Path: path, MaxAge: 60, Secure: a.cfg.Security.CookieSecure, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "1", Path: path, MaxAge: downloadConfirmMaxAge, Secure: a.cfg.Security.CookieSecure, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+}
+
+func (a *App) renderDownloadConfirmPage(w http.ResponseWriter, r *http.Request, f myfiles.File, backURL, actionURL string) {
+	downloadText := "Download"
+	title := "Confirm download"
+	message := "This file is not previewed inline. Confirm that you trust the source before downloading."
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "zh") {
+		downloadText = "确认下载"
+		title = "下载确认"
+		message = "该文件不会直接在线预览。请确认文件来源可信后再下载。"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>%s</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png">
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;align-content:start;justify-items:center;padding:32px 16px;background:#f6f8fb;color:#172033;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(760px,calc(100vw - 32px));display:grid;gap:16px;padding:24px;border:1px solid #d8e0ea;border-radius:8px;background:#fff;box-shadow:0 18px 44px rgba(22,32,51,.08)}.head{display:grid;grid-template-columns:auto minmax(0,1fr);gap:14px;align-items:center}.icon{width:58px;height:58px;display:grid;place-items:center;border:1px solid #c3cede;border-radius:8px;background:#edf2f7}.icon img{display:block;width:32px;height:32px}h1{margin:0;font-size:26px;line-height:1.2;overflow-wrap:anywhere}p{margin:0;color:#526176}.file-name{font-weight:800;overflow-wrap:anywhere}.actions{display:flex;gap:10px;flex-wrap:wrap}a,button{border:1px solid #c3cede;border-radius:6px;background:#fff;color:#172033;padding:10px 14px;font:inherit;font-weight:800;text-decoration:none;cursor:pointer}.primary{background:#ffd44d;border-color:#d7a900;color:#15120a}
+	</style>
+	</head>
+	<body><main class="card"><div class="head"><span class="icon">%s</span><div><h1>%s</h1><p>%s</p></div></div><div class="file-name">%s</div><div class="actions"><form method="post" action="%s"><button class="primary" type="submit">%s</button></form><a href="%s">返回预览</a></div></main></body></html>`,
+		html.EscapeString(title), fileIconHTML(f.MIME, f.OriginalName), html.EscapeString(title), html.EscapeString(message),
+		html.EscapeString(f.OriginalName), html.EscapeString(actionURL), html.EscapeString(downloadText), html.EscapeString(backURL))
 }
 
 func (a *App) hasDownloadConfirmation(r *http.Request, name string) bool {
@@ -3244,7 +4064,7 @@ func (a *App) serveFrontend(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
-			setFrontendCacheHeaders(w, r.URL.Path, c)
+			setFrontendCacheHeaders(w, r.URL.RequestURI(), c)
 			http.ServeFile(w, r, c)
 			return
 		}
@@ -3266,12 +4086,16 @@ func setFrontendCacheHeaders(w http.ResponseWriter, urlPath, diskPath string) {
 	case ext == ".txt":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
-	if ext == ".html" || strings.HasPrefix(urlPath, "/app/") {
+	if ext == ".html" {
 		w.Header().Set("Cache-Control", "no-store")
 		return
 	}
 	if strings.HasPrefix(urlPath, "/app/") || strings.HasPrefix(urlPath, "/assets/") || ext == ".css" || ext == ".js" || ext == ".png" || ext == ".svg" || ext == ".webp" {
-		w.Header().Set("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400")
+		if r := strings.TrimSpace(urlPath); strings.Contains(r, "?") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400")
+		}
 		return
 	}
 	if strings.HasPrefix(urlPath, "/dashboard/") || strings.HasPrefix(urlPath, "/a/") || strings.HasPrefix(urlPath, "/d/") {
@@ -3486,12 +4310,14 @@ func configSettings(cfg config.Config) map[string]any {
 		"file.defaultRegionPolicy":   cfg.File.DefaultRegionPolicy,
 		"file.defaultHotlinkPolicy":  cfg.File.DefaultHotlinkPolicy,
 		"storage.mode":               cfg.Storage.Mode,
-		"storage.uploadUrl":          cfg.Storage.UploadURL,
 		"storage.timeoutSeconds":     cfg.Storage.TimeoutSeconds,
-		"storage.localDir":           cfg.Storage.LocalDir,
-		"storage.chatId":             cfg.Storage.ChatID,
-		"storage.apiKey":             "",
-		"storage.apiKeyConfigured":   storage.ValidBotToken(cfg.Storage.APIKey),
+		"storage.r2Endpoint":         cfg.Storage.R2Endpoint,
+		"storage.r2Bucket":           cfg.Storage.R2Bucket,
+		"storage.r2AccessKeyId":      cfg.Storage.R2AccessKeyID,
+		"storage.r2SecretAccessKey":  "",
+		"storage.r2SecretConfigured": cfg.Storage.R2SecretAccessKey != "",
+		"storage.r2Region":           cfg.Storage.R2Region,
+		"storage.r2Prefix":           cfg.Storage.R2Prefix,
 		"cdn.baseUrl":                cfg.Storage.PublicBaseURL,
 		"security.sessionCookieName": cfg.Security.SessionCookieName,
 		"security.sessionTtlHours":   cfg.Security.SessionTTLHours,
@@ -3511,7 +4337,7 @@ func (a *App) patchConfigSettings(body map[string]any) error {
 
 	cfg := a.cfg
 	applyConfigPatch(&cfg, body)
-	if touchesStorage(body) && cfg.Storage.Mode == "tgbots" {
+	if touchesStorage(body) && cfg.Storage.Mode == "r2" {
 		if err := testStorageConfig(context.Background(), cfg.Storage); err != nil {
 			return fmt.Errorf("存储通道测试失败，设置未保存：%w", err)
 		}
@@ -3560,20 +4386,24 @@ func applyConfigPatch(cfg *config.Config, body map[string]any) {
 			cfg.File.DefaultHotlinkPolicy = stringValue(value)
 		case "storage.mode":
 			cfg.Storage.Mode = stringValue(value)
-		case "storage.uploadUrl":
-			cfg.Storage.UploadURL = strings.TrimSuffix(stringValue(value), "/files")
 		case "storage.timeoutSeconds":
 			if n := int(floatValue(value)); n > 0 {
 				cfg.Storage.TimeoutSeconds = n
 			}
-		case "storage.localDir":
-			cfg.Storage.LocalDir = stringValue(value)
-		case "storage.chatId":
-			cfg.Storage.ChatID = stringValue(value)
-		case "storage.apiKey":
+		case "storage.r2Endpoint":
+			cfg.Storage.R2Endpoint = strings.TrimRight(stringValue(value), "/")
+		case "storage.r2Bucket":
+			cfg.Storage.R2Bucket = stringValue(value)
+		case "storage.r2AccessKeyId":
+			cfg.Storage.R2AccessKeyID = stringValue(value)
+		case "storage.r2SecretAccessKey":
 			if s := stringValue(value); s != "" {
-				cfg.Storage.APIKey = s
+				cfg.Storage.R2SecretAccessKey = s
 			}
+		case "storage.r2Region":
+			cfg.Storage.R2Region = stringValue(value)
+		case "storage.r2Prefix":
+			cfg.Storage.R2Prefix = strings.Trim(stringValue(value), "/")
 		case "cdn.baseUrl":
 			cfg.Storage.PublicBaseURL = stringValue(value)
 		case "security.sessionCookieName":
@@ -3607,7 +4437,7 @@ func testStorageConfig(ctx context.Context, cfg config.StorageConfig) error {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	content := []byte("myfiles tgbots storage test\n")
+	content := []byte("myfiles r2 storage test\n")
 	if _, err := tmp.Write(content); err != nil {
 		_ = tmp.Close()
 		return err

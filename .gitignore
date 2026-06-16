@@ -5,6 +5,7 @@ frontend/dist/
 frontend/.astro/
 frontend/node_modules/
 data/
+backups/
 configs/config.local.json
 *.bak.*
 *.sqlite3

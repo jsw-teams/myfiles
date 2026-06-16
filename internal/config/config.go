@@ -45,13 +45,20 @@ type AccountConfig struct {
 }
 
 type StorageConfig struct {
-	Mode           string `json:"mode"`
-	UploadURL      string `json:"upload_url"`
-	PublicBaseURL  string `json:"public_base_url"`
-	APIKey         string `json:"api_key"`
-	ChatID         string `json:"chat_id"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	LocalDir       string `json:"local_dir"`
+	Mode              string `json:"mode"`
+	UploadURL         string `json:"upload_url,omitempty"`
+	PublicBaseURL     string `json:"public_base_url"`
+	APIKey            string `json:"api_key,omitempty"`
+	ChatID            string `json:"chat_id,omitempty"`
+	TimeoutSeconds    int    `json:"timeout_seconds"`
+	LocalDir          string `json:"local_dir"`
+	R2Endpoint        string `json:"r2_endpoint"`
+	R2Bucket          string `json:"r2_bucket"`
+	R2AccessKeyID     string `json:"r2_access_key_id"`
+	R2SecretAccessKey string `json:"r2_secret_access_key"`
+	R2Region          string `json:"r2_region"`
+	R2Prefix          string `json:"r2_prefix"`
+	R2PublicBaseURL   string `json:"r2_public_base_url,omitempty"`
 }
 
 type UploadConfig struct {
@@ -78,6 +85,7 @@ type AuditConfig struct {
 }
 
 const DefaultUploadMaxBytes int64 = 2 * 1024 * 1024 * 1024
+const DefaultPublicBaseURL = "https://files.js.gripe"
 
 func Load(path string) (Config, error) {
 	cfg := Default()
@@ -112,9 +120,9 @@ func Save(path string, cfg Config) error {
 
 func Default() Config {
 	cfg := Config{}
-	cfg.App = AppConfig{Name: "myfiles", BaseURL: "http://127.0.0.1:19110", ListenAddr: "127.0.0.1:19110", PublicDir: "./frontend/dist", DataDir: "./data", TempDir: "./data/tmp"}
+	cfg.App = AppConfig{Name: "myfiles", BaseURL: DefaultPublicBaseURL, ListenAddr: "127.0.0.1:19110", PublicDir: "./frontend/dist", DataDir: "./data", TempDir: "./data/tmp"}
 	cfg.Database.Path = "./data/myfiles.sqlite3"
-	cfg.Account = AccountConfig{ClientName: "myfiles", ClientID: "myfiles", LoginURL: "https://account.js.gripe/login", AccountBaseURL: "https://gateway.js.gripe/api/v1/myaccount", MeURL: "https://gateway.js.gripe/api/v1/myaccount/me", RedirectURI: "http://127.0.0.1:19110/auth/account/callback", Scopes: []string{"accounts:read", "identities:resolve"}}
+	cfg.Account = AccountConfig{ClientName: "myfiles", ClientID: "myfiles", LoginURL: "https://account.js.gripe/login", AccountBaseURL: "https://gateway.js.gripe/api/v1/myaccount", MeURL: "https://gateway.js.gripe/api/v1/myaccount/me", RedirectURI: DefaultPublicBaseURL + "/auth/account/callback", Scopes: []string{"accounts:read", "identities:resolve"}}
 	cfg.Storage = StorageConfig{Mode: "local", PublicBaseURL: cfg.App.BaseURL, TimeoutSeconds: 120, LocalDir: "./data/storage"}
 	cfg.Upload = UploadConfig{MaxBytes: DefaultUploadMaxBytes, AllowedMIMETypes: []string{"*/*"}, AllowAnonymous: true}
 	cfg.File = FileConfig{DefaultPublic: true, DefaultRequireConfirm: false, DefaultRegionPolicy: "global", DefaultHotlinkPolicy: "allow"}
@@ -153,6 +161,9 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Storage.Mode == "" {
 		cfg.Storage.Mode = "local"
+	}
+	if cfg.Storage.R2Region == "" {
+		cfg.Storage.R2Region = "auto"
 	}
 	if cfg.Storage.TimeoutSeconds <= 0 {
 		cfg.Storage.TimeoutSeconds = 120
@@ -199,8 +210,24 @@ func validate(cfg Config) error {
 	if cfg.Account.RedirectURI == "" {
 		return errors.New("account.redirect_uri is required")
 	}
-	if cfg.Storage.Mode == "tgbots" && cfg.Storage.UploadURL == "" {
-		return errors.New("storage.upload_url is required when storage.mode=tgbots")
+	switch cfg.Storage.Mode {
+	case "local", "r2":
+	default:
+		return errors.New("storage.mode must be r2 or local")
+	}
+	if cfg.Storage.Mode == "r2" {
+		if cfg.Storage.R2Endpoint == "" {
+			return errors.New("storage.r2_endpoint is required when storage.mode=r2")
+		}
+		if cfg.Storage.R2Bucket == "" {
+			return errors.New("storage.r2_bucket is required when storage.mode=r2")
+		}
+		if cfg.Storage.R2AccessKeyID == "" {
+			return errors.New("storage.r2_access_key_id is required when storage.mode=r2")
+		}
+		if cfg.Storage.R2SecretAccessKey == "" {
+			return errors.New("storage.r2_secret_access_key is required when storage.mode=r2")
+		}
 	}
 	return nil
 }

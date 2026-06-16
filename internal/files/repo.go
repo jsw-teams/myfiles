@@ -413,10 +413,22 @@ func GetFile(conn *sql.DB, id string, includeDeleted bool) (File, error) {
 	return scanFile(row)
 }
 
-func SoftDelete(conn *sql.DB, id string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := conn.Exec(`UPDATE files SET status='deleted', deleted_at=?, updated_at=? WHERE id=? AND status <> 'deleted'`, now, now, id)
-	return err
+func HardDelete(conn *sql.DB, id string) error {
+	tx, err := conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM pickup_share_files WHERE file_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM file_events WHERE file_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM files WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func PatchAdmin(conn *sql.DB, id string, isPublic *bool, requireConfirm *bool, regionPolicy, hotlinkPolicy, status string) error {
@@ -452,6 +464,12 @@ func PatchAdmin(conn *sql.DB, id string, isPublic *bool, requireConfirm *bool, r
 	}
 	args = append(args, id)
 	_, err := conn.Exec(`UPDATE files SET `+strings.Join(sets, ", ")+` WHERE id=?`, args...)
+	return err
+}
+
+func SetThumbnailFileID(conn *sql.DB, id, thumbnailFileID string) error {
+	_, err := conn.Exec(`UPDATE files SET thumbnail_file_id=?, updated_at=? WHERE id=?`,
+		nullEmpty(thumbnailFileID), time.Now().UTC().Format(time.RFC3339), id)
 	return err
 }
 
