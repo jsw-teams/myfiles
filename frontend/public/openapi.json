@@ -3,7 +3,7 @@
   "info": {
     "title": "Files.js.gripe API",
     "version": "1.0.0",
-    "description": "Protected file upload, sharing, and administration API. Public /files links may be fetched directly; protected APIs, dashboards, upload results, setup, and admin pages are not crawl targets."
+    "description": "Protected file upload, sharing, and administration API. Public /files and /files/raw links may be fetched directly; protected APIs, dashboards, upload results, setup, and admin pages are not crawl targets."
   },
   "servers": [
     {
@@ -54,18 +54,44 @@
         }
       }
     },
-    "/api/upload": {
+    "/api/upload/r2/init": {
       "post": {
-        "summary": "Upload files subject to policy",
+        "summary": "Create an R2 direct-upload session and presigned URLs",
         "responses": {
           "200": {
-            "description": "Upload batch result"
+            "description": "Upload session, file ids, and presigned PUT or multipart part URLs"
           },
           "401": {
             "description": "Authentication required when anonymous uploads are disabled"
           },
           "413": {
             "description": "Upload too large"
+          }
+        }
+      }
+    },
+    "/api/upload/r2/complete": {
+      "post": {
+        "summary": "Complete an R2 direct-upload session",
+        "responses": {
+          "200": {
+            "description": "Upload batch result with pickup code"
+          },
+          "400": {
+            "description": "Missing or incomplete uploaded parts"
+          },
+          "404": {
+            "description": "Upload session expired or not found"
+          }
+        }
+      }
+    },
+    "/api/upload/r2/cancel": {
+      "post": {
+        "summary": "Abort an unfinished R2 direct-upload session",
+        "responses": {
+          "200": {
+            "description": "Upload session cancelled"
           }
         }
       }

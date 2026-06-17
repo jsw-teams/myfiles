@@ -4,7 +4,7 @@ export async function GET() {
 myfiles is a file service with temporary pickup codes.
 
 AI and crawler policy:
-- Public /files links are user-shared file URLs and may be fetched directly when the file remains public.
+- Public /files and /files/raw links are user-shared file URLs and may be fetched directly when the file remains public.
 - Private application surfaces, account-only APIs, and administrative pages are not crawl targets.
 - Discovery metadata is public so agents can understand authentication and access boundaries.
 
@@ -22,6 +22,7 @@ Public discovery pages:
 
 User-controlled sharing paths:
 - /files/{id}.{ext}
+- /files/raw/{id}.{ext}
 - /files/{id}.{ext}/info
 - /?code={pickupCode}
 - /pickup/{pickupCode}/{fileId}.{ext}

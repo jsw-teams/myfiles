@@ -12,8 +12,9 @@ Disallow: /
 
 User-agent: *
 Allow: /
-# Private application surfaces are not useful crawl targets. Public /files links
-# remain crawlable so shared file URLs can be fetched directly.
+# Public /files and /files/raw links intentionally stay crawlable so public
+# shared files can be fetched directly. Private application surfaces are not
+# useful crawl targets.
 Disallow: /api/
 Disallow: /admin
 Disallow: /setup

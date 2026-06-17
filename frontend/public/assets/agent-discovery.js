@@ -27,7 +27,7 @@
       execute: async () => ({
         site,
         resources: discoveryResources,
-        crawlingPolicy: "Public /files links may be fetched directly. Authenticated pages, APIs, admin pages, setup, upload result pages, and pickup flows are not crawl targets."
+        crawlingPolicy: "Public /files and /files/raw links may be fetched directly. Authenticated pages, APIs, admin pages, setup, upload result pages, and pickup flows are not crawl targets."
       })
     },
     {
@@ -46,7 +46,7 @@
         oauthProtectedResource: `${site}/.well-known/oauth-protected-resource`,
         publicFilePaths: ["/files/{id}.{ext}", "/files/raw/{id}.{ext}"],
         blockedPaths: ["/api/", "/admin", "/setup", "/dashboard/", "/uploads/", "/file/", "/f/", "/pickup/"],
-        note: "Public /files links can be fetched directly while they remain public."
+        note: "Public /files and /files/raw links can be fetched directly while they remain public."
       })
     }
   ];

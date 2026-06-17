@@ -52,7 +52,9 @@ Personal files and all-file management support selection and batch operations. B
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/upload` | Upload files and create a batch pickup code |
+| `POST /api/upload/r2/init` | Validate files, create an R2 upload session, and return presigned part URLs |
+| `POST /api/upload/r2/complete` | Complete uploaded R2 objects and create a batch pickup code |
+| `POST /api/upload/r2/cancel` | Abort an unfinished R2 upload session |
 | `GET /api/me` | Current account and permission snapshot |
 | `GET /api/files` | Current user's files |
 | `POST /api/files/batch` | Batch delete or share current user's selected files |
@@ -105,6 +107,7 @@ Common fields:
 - `storage.r2_secret_access_key`: R2 S3 secret access key.
 - `storage.r2_region`: R2 signing region, normally `auto`.
 - `storage.r2_prefix`: optional object key prefix.
+- R2 bucket CORS must allow `GET`, `HEAD`, `PUT`, `POST`, and `DELETE` from `https://files.js.gripe`; expose `ETag` so multipart browser uploads can complete.
 - `file.default_region_policy`: `global`, `allow:<codes>`, or `deny:<codes>`.
 - `file.default_hotlink_policy`: `allow` or `deny`.
 - `security.session_ttl_hours`: browser session duration.
