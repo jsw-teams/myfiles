@@ -4,15 +4,12 @@ import Base from "../layouts/Base.astro";
 <Base titleKey="setup" noindex={true}>
   <main id="main-content" class="login-page pixel-auth setup-page">
     <section class="login-card setup-card">
-      <div class="login-art">
-        <img src="/assets/myfiles-auth-v2.png" alt="" />
-        <div class="bear-bubble">
+      <div class="login-form-panel">
+        <div class="auth-head">
           <div class="pixel-kicker" data-setup-kicker>SETUP</div>
           <h1>myfiles</h1>
-          <p data-setup-copy>创建本地系统管理员后即可独立管理文件服务。</p>
+          <p class="muted" data-setup-copy>创建本地系统管理员后即可独立管理文件服务。</p>
         </div>
-      </div>
-      <div class="login-form-panel">
         <h2 data-setup-title>初始化</h2>
         <p class="muted" data-setup-desc>首个账户会成为 system_admin。初始化完成后可使用本地账号登录，SSO 只是可选绑定。</p>
         <form id="setup-form" class="grid" autocomplete="off">

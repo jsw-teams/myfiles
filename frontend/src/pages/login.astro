@@ -4,15 +4,12 @@ import Base from "../layouts/Base.astro";
 <Base titleKey="login" noindex={true}>
   <main id="main-content" class="login-page pixel-auth">
     <section class="login-card">
-      <div class="login-art">
-        <img src="/assets/myfiles-auth-v2.png" alt="" />
-        <div class="bear-bubble">
+      <div class="login-form-panel">
+        <div class="auth-head">
           <div class="pixel-kicker" data-login-kicker>LOCAL ACCOUNT</div>
           <h1 data-brand>myfiles</h1>
-          <p data-login-copy>使用 myfiles 本地账户进入文件控制台。</p>
+          <p class="muted" data-login-copy>使用 myfiles 本地账户进入文件控制台。</p>
         </div>
-      </div>
-      <div class="login-form-panel">
         <h2 data-login-title>登录</h2>
         <p class="muted" data-login-desc>先输入邮箱，再继续输入密码。</p>
         <form id="login-form" class="grid" autocomplete="on">

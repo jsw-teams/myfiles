@@ -146,7 +146,7 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 	case p == "/api/auth/logout":
 		a.handleLogout(w, r)
 	case p == "/api/upload":
-		a.handleUpload(w, r)
+		a.handleLegacyUploadDisabled(w, r)
 	case p == "/api/upload/r2/init":
 		a.handleR2UploadInit(w, r)
 	case p == "/api/upload/r2/complete":
@@ -154,13 +154,13 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 	case p == "/api/upload/r2/cancel":
 		a.handleR2UploadCancel(w, r)
 	case p == "/api/upload/chunk/init":
-		a.handleChunkInit(w, r)
+		a.handleLegacyUploadDisabled(w, r)
 	case p == "/api/upload/chunk/cancel":
-		a.handleChunkCancel(w, r)
+		a.handleLegacyUploadDisabled(w, r)
 	case p == "/api/upload/chunk/complete":
-		a.handleChunkComplete(w, r)
+		a.handleLegacyUploadDisabled(w, r)
 	case strings.HasPrefix(p, "/api/upload/chunk/"):
-		a.handleChunkPart(w, r)
+		a.handleLegacyUploadDisabled(w, r)
 	case p == "/api/files":
 		a.handleFiles(w, r)
 	case p == "/api/files/batch":
@@ -450,6 +450,10 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"resultPath":      "/uploads/" + url.PathEscape(batch.ID),
 		"downloadPath":    "/uploads/" + url.PathEscape(batch.ID),
 	})
+}
+
+func (a *App) handleLegacyUploadDisabled(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusGone, "r2_direct_upload_required", "请使用 /api/upload/r2/init 创建 R2 直传会话", nil)
 }
 
 type chunkUploadManifest struct {
@@ -4309,9 +4313,18 @@ func configSettings(cfg config.Config) map[string]any {
 		"file.defaultRequireConfirm": cfg.File.DefaultRequireConfirm,
 		"file.defaultRegionPolicy":   cfg.File.DefaultRegionPolicy,
 		"file.defaultHotlinkPolicy":  cfg.File.DefaultHotlinkPolicy,
+		"sso.clientName":             cfg.Account.ClientName,
+		"sso.loginUrl":               cfg.Account.LoginURL,
+		"sso.accountBaseUrl":         cfg.Account.AccountBaseURL,
+		"sso.meUrl":                  cfg.Account.MeURL,
+		"sso.clientId":               cfg.Account.ClientID,
+		"sso.clientSecret":           "",
+		"sso.clientSecretConfigured": cfg.Account.ClientSecret != "",
+		"sso.redirectUri":            cfg.Account.RedirectURI,
+		"sso.scopes":                 cfg.Account.Scopes,
 		"storage.mode":               cfg.Storage.Mode,
 		"storage.timeoutSeconds":     cfg.Storage.TimeoutSeconds,
-		"storage.r2Endpoint":         cfg.Storage.R2Endpoint,
+		"storage.r2Endpoint":         normalizeR2EndpointForSettings(cfg.Storage.R2Endpoint, cfg.Storage.R2Bucket),
 		"storage.r2Bucket":           cfg.Storage.R2Bucket,
 		"storage.r2AccessKeyId":      cfg.Storage.R2AccessKeyID,
 		"storage.r2SecretAccessKey":  "",
@@ -4373,9 +4386,7 @@ func applyConfigPatch(cfg *config.Config, body map[string]any) {
 		case "upload.allowAnonymous":
 			cfg.Upload.AllowAnonymous = boolValue(value)
 		case "upload.allowedMimeTypes":
-			if list := stringSliceValue(value); len(list) > 0 {
-				cfg.Upload.AllowedMIMETypes = list
-			}
+			cfg.Upload.AllowedMIMETypes = stringSliceValue(value)
 		case "file.defaultPublic":
 			cfg.File.DefaultPublic = boolValue(value)
 		case "file.defaultRequireConfirm":
@@ -4384,6 +4395,24 @@ func applyConfigPatch(cfg *config.Config, body map[string]any) {
 			cfg.File.DefaultRegionPolicy = normalizeRegionPolicy(stringValue(value))
 		case "file.defaultHotlinkPolicy":
 			cfg.File.DefaultHotlinkPolicy = stringValue(value)
+		case "sso.clientName":
+			cfg.Account.ClientName = stringValue(value)
+		case "sso.loginUrl":
+			cfg.Account.LoginURL = strings.TrimRight(stringValue(value), "/")
+		case "sso.accountBaseUrl":
+			cfg.Account.AccountBaseURL = strings.TrimRight(stringValue(value), "/")
+		case "sso.meUrl":
+			cfg.Account.MeURL = strings.TrimRight(stringValue(value), "/")
+		case "sso.clientId":
+			cfg.Account.ClientID = stringValue(value)
+		case "sso.clientSecret":
+			if s := stringValue(value); s != "" {
+				cfg.Account.ClientSecret = s
+			}
+		case "sso.redirectUri":
+			cfg.Account.RedirectURI = stringValue(value)
+		case "sso.scopes":
+			cfg.Account.Scopes = stringSliceValue(value)
 		case "storage.mode":
 			cfg.Storage.Mode = stringValue(value)
 		case "storage.timeoutSeconds":
@@ -4391,9 +4420,10 @@ func applyConfigPatch(cfg *config.Config, body map[string]any) {
 				cfg.Storage.TimeoutSeconds = n
 			}
 		case "storage.r2Endpoint":
-			cfg.Storage.R2Endpoint = strings.TrimRight(stringValue(value), "/")
+			cfg.Storage.R2Endpoint = normalizeR2EndpointForSettings(stringValue(value), cfg.Storage.R2Bucket)
 		case "storage.r2Bucket":
-			cfg.Storage.R2Bucket = stringValue(value)
+			cfg.Storage.R2Bucket = strings.Trim(stringValue(value), "/")
+			cfg.Storage.R2Endpoint = normalizeR2EndpointForSettings(cfg.Storage.R2Endpoint, cfg.Storage.R2Bucket)
 		case "storage.r2AccessKeyId":
 			cfg.Storage.R2AccessKeyID = stringValue(value)
 		case "storage.r2SecretAccessKey":
@@ -4429,6 +4459,30 @@ func touchesStorage(body map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func normalizeR2EndpointForSettings(endpoint, bucket string) string {
+	value := strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	if value == "" {
+		return ""
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return value
+	}
+	cleanBucket := strings.Trim(strings.TrimSpace(bucket), "/")
+	if cleanBucket == "" {
+		return value
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) > 0 && parts[len(parts)-1] == cleanBucket {
+		parts = parts[:len(parts)-1]
+		u.Path = ""
+		if len(parts) > 0 {
+			u.Path = "/" + strings.Join(parts, "/")
+		}
+	}
+	return strings.TrimRight(u.String(), "/")
 }
 
 func testStorageConfig(ctx context.Context, cfg config.StorageConfig) error {

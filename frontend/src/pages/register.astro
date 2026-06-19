@@ -4,15 +4,12 @@ import Base from "../layouts/Base.astro";
 <Base titleKey="register" noindex={true}>
   <main id="main-content" class="login-page pixel-auth">
     <section class="login-card">
-      <div class="login-art">
-        <img src="/assets/myfiles-auth-v2.png" alt="" />
-        <div class="bear-bubble">
+      <div class="login-form-panel">
+        <div class="auth-head">
           <div class="pixel-kicker" data-register-kicker>LOCAL ACCOUNT</div>
           <h1 data-brand>myfiles</h1>
-          <p data-register-copy>创建一个本地账户，用于上传、管理和取件。</p>
+          <p class="muted" data-register-copy>创建一个本地账户，用于上传、管理和取件。</p>
         </div>
-      </div>
-      <div class="login-form-panel">
         <h2 data-register-title>注册</h2>
         <p class="muted" data-register-desc>是否开放注册由系统管理员在控制台统一控制。</p>
         <form id="register-form" class="grid" autocomplete="on">
