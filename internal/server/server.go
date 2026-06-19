@@ -2585,7 +2585,7 @@ func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		settings := configSettings(a.snapshotConfig())
-		a.attachRuntimeSettings(settings)
+		a.attachStoredSettings(settings)
 		writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
 	case http.MethodPatch:
 		if !s.Permissions.SettingsWrite {
@@ -2620,8 +2620,12 @@ func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if err := a.patchStoredSettings(body); err != nil {
+			writeError(w, 400, "settings_save_failed", err.Error(), nil)
+			return
+		}
 		settings := configSettings(a.snapshotConfig())
-		a.attachRuntimeSettings(settings)
+		a.attachStoredSettings(settings)
 		audit.Write(a.db, r, audit.Actor{AccountUserID: s.User.ID, Role: s.User.Role}, "settings.patch", "config_file", "myfiles", body)
 		writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
 	default:
@@ -2642,18 +2646,21 @@ func splitSettingsPatch(body map[string]any) (map[string]any, map[string]any) {
 	return configBody, runtimeBody
 }
 
-func (a *App) attachRuntimeSettings(settings map[string]any) {
+func (a *App) attachStoredSettings(settings map[string]any) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	values := map[string]any{
+	defaults := map[string]any{
 		"auth.allowRegistration": false,
 		"auth.ssoEnabled":        true,
 	}
-	for key, fallback := range values {
-		value := fallback
-		if stored, ok := a.settingValue(key); ok {
-			value = stored
+	for key, fallback := range defaults {
+		if _, exists := settings[key]; !exists {
+			settings[key] = map[string]any{"value": fallback, "updatedAt": now}
 		}
-		settings[key] = map[string]any{"value": value, "updatedAt": now}
+	}
+	for key := range settings {
+		if stored, ok := a.settingValue(key); ok {
+			settings[key] = map[string]any{"value": stored, "updatedAt": now}
+		}
 	}
 }
 
@@ -2672,6 +2679,45 @@ func (a *App) patchRuntimeSettings(body map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func (a *App) patchStoredSettings(body map[string]any) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	for key, value := range body {
+		if strings.HasSuffix(key, "Secret") && strings.TrimSpace(stringValue(value)) == "" {
+			continue
+		}
+		raw, err := json.Marshal(normalizeStoredSetting(key, value))
+		if err != nil {
+			return err
+		}
+		if _, err := a.db.Exec(`INSERT INTO site_settings(key, value_json, updated_at) VALUES(?, ?, ?)
+			ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at`, key, string(raw), now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeStoredSetting(key string, value any) any {
+	switch key {
+	case "upload.allowAnonymous", "file.defaultPublic", "file.defaultRequireConfirm", "auth.allowRegistration", "auth.ssoEnabled", "security.cookieSecure":
+		return boolValue(value)
+	case "upload.maxMB", "security.sessionTtlHours", "audit.retentionDays", "storage.timeoutSeconds":
+		return floatValue(value)
+	case "upload.allowedMimeTypes", "sso.scopes":
+		return stringSliceValue(value)
+	case "file.defaultRegionPolicy":
+		return normalizeRegionPolicy(stringValue(value))
+	case "storage.r2Endpoint":
+		return strings.TrimRight(stringValue(value), "/")
+	case "storage.r2Bucket", "storage.r2Prefix":
+		return strings.Trim(stringValue(value), "/")
+	case "sso.loginUrl", "sso.accountBaseUrl", "sso.meUrl":
+		return strings.TrimRight(stringValue(value), "/")
+	default:
+		return stringValue(value)
+	}
 }
 
 func (a *App) handleAdminStorageTest(w http.ResponseWriter, r *http.Request) {
@@ -4297,6 +4343,27 @@ func (a *App) effectiveUploadPolicy() uploadPolicy {
 		DefaultRequireConfirm: cfg.File.DefaultRequireConfirm,
 		DefaultRegionPolicy:   cfg.File.DefaultRegionPolicy,
 		DefaultHotlinkPolicy:  cfg.File.DefaultHotlinkPolicy,
+	}
+	if v, ok := a.settingFloat("upload.maxMB"); ok && v > 0 {
+		p.MaxBytes = int64(v * 1024 * 1024)
+	}
+	if v, ok := a.settingStringSlice("upload.allowedMimeTypes"); ok {
+		p.AllowedMIMETypes = v
+	}
+	if v, ok := a.settingBool("upload.allowAnonymous"); ok {
+		p.AllowAnonymous = v
+	}
+	if v, ok := a.settingBool("file.defaultPublic"); ok {
+		p.DefaultPublic = v
+	}
+	if v, ok := a.settingBool("file.defaultRequireConfirm"); ok {
+		p.DefaultRequireConfirm = v
+	}
+	if v, ok := a.settingString("file.defaultRegionPolicy"); ok {
+		p.DefaultRegionPolicy = normalizeRegionPolicy(v)
+	}
+	if v, ok := a.settingString("file.defaultHotlinkPolicy"); ok {
+		p.DefaultHotlinkPolicy = v
 	}
 	return p
 }
