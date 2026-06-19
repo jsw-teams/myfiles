@@ -81,7 +81,7 @@ document.documentElement.lang = lang;
 
 let brandName = "myfiles";
 try {
-  const res = await fetch("/api/bootstrap", { cache: "no-store" });
+  const res = await fetch(`/api/bootstrap?_=${Date.now()}`, { cache: "no-store" });
   const json = await res.json();
   brandName = json?.brand?.name || brandName;
 } catch {

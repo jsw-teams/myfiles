@@ -105,7 +105,8 @@ import Base from "../layouts/Base.astro";
     let account = null;
     let currentUpload = null;
     let selectedFiles = [];
-    fetch("/api/bootstrap").then(r => r.json()).then(j => { bootstrap = j; }).catch(() => {});
+    const freshUrl = (path) => `${path}${path.includes("?") ? "&" : "?"}_=${Date.now()}`;
+    fetch(freshUrl("/api/bootstrap"), { cache: "no-store" }).then(r => r.json()).then(j => { bootstrap = j; }).catch(() => {});
     detectAccount();
     document.addEventListener("site-i18n-ready", (event) => { labels = event.detail?.labels || labels; renderAccountState(); });
 
@@ -134,7 +135,7 @@ import Base from "../layouts/Base.astro";
       pickupStatus.className = "pixel-alert ok";
       pickupStatus.textContent = msg("pickupChecking");
       try {
-        const res = await fetch("/api/pickup/" + encodeURIComponent(code), { cache: "no-store" });
+        const res = await fetch(freshUrl("/api/pickup/" + encodeURIComponent(code)), { cache: "no-store" });
         const json = await res.json().catch(() => ({}));
         if (!res.ok || !json.ok) {
           pickupStatus.className = "pixel-alert";
@@ -235,7 +236,7 @@ import Base from "../layouts/Base.astro";
 
     async function detectAccount() {
       try {
-        const res = await fetch("/api/account/me", { cache: "no-store" });
+        const res = await fetch(freshUrl("/api/account/me"), { cache: "no-store" });
         const json = await res.json().catch(() => ({}));
         account = res.ok && json.ok ? json : null;
       } catch {

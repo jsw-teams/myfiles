@@ -76,7 +76,8 @@ import Base from "../layouts/Base.astro";
     const form = document.querySelector("#register-form");
     const alertBox = document.querySelector("#alert");
     const show = (message) => { alertBox.textContent = message; alertBox.style.display = "block"; };
-    fetch("/api/auth/options?_v=20260616accounts3", { cache: "no-store" })
+    const freshUrl = (path) => `${path}${path.includes("?") ? "&" : "?"}_=${Date.now()}`;
+    fetch(freshUrl("/api/auth/options"), { cache: "no-store" })
       .then((res) => res.ok ? res.json() : null)
       .then((json) => {
         if (json?.initialized === false) {

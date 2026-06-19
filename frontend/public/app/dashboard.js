@@ -286,7 +286,8 @@ async function runBulkAdminPolicy(action) {
   await api('/api/admin/files/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, fileIds: ids }) });
   await loadAdminFiles(document.querySelector('#admin-files-q')?.value || '');
 }
-async function api(path, opts = {}) { const res = await fetch(path, { credentials: 'include', ...opts }); const json = await res.json().catch(() => ({})); if (!res.ok || json.ok === false) throw new Error(json.error || 'Request failed'); return json; }
+async function api(path, opts = {}) { const method = String(opts.method || 'GET').toUpperCase(); const requestPath = method === 'GET' ? withCacheBust(path) : path; const res = await fetch(requestPath, { credentials: 'include', cache: 'no-store', ...opts }); const json = await res.json().catch(() => ({})); if (!res.ok || json.ok === false) throw new Error(json.error || 'Request failed'); return json; }
+function withCacheBust(path) { const join = path.includes('?') ? '&' : '?'; return `${path}${join}_=${Date.now()}`; }
 function publicFilePath(file) { const ext = String(file.originalName || '').match(/\.[a-z0-9]{1,10}$/i)?.[0]?.toLowerCase() || ''; return `/files/${file.id}${ext}`; }
 function empty(text) { return `<div class="empty-state"><span>${escapeHtml(text)}</span></div>`; }
 function skeletonCards(count) { return Array.from({ length: count }, () => '<article class="data-card skeleton-card"><div class="skeleton-check"></div><div><span></span><p></p><small></small></div><div class="card-actions"><b></b><b></b></div></article>').join(''); }

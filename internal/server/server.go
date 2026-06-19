@@ -84,6 +84,10 @@ func (a *App) securityHeaders(next http.Handler) http.Handler {
 		if strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/admin") || strings.HasPrefix(p, "/dashboard") || strings.HasPrefix(p, "/setup") {
 			w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		}
+		if strings.HasPrefix(p, "/api/") {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("CDN-Cache-Control", "no-store")
+		}
 		if isProbePath(p) {
 			http.NotFound(w, r)
 			return

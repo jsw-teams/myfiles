@@ -106,7 +106,9 @@ import Base from "../layouts/Base.astro";
       alertBox.style.display = "block";
     };
 
-    fetch("/api/auth/options?_v=20260616accounts3", { cache: "no-store" })
+    const freshUrl = (path) => `${path}${path.includes("?") ? "&" : "?"}_=${Date.now()}`;
+
+    fetch(freshUrl("/api/auth/options"), { cache: "no-store" })
       .then((res) => res.ok ? res.json() : null)
       .then((json) => {
         if (json && json.initialized === false) {
@@ -119,7 +121,7 @@ import Base from "../layouts/Base.astro";
       })
       .catch(() => {});
 
-    fetch("/api/auth/me", { cache: "no-store", credentials: "include" })
+    fetch(freshUrl("/api/auth/me"), { cache: "no-store", credentials: "include" })
       .then((res) => res.ok ? res.json() : null)
       .then((json) => {
         if (json?.ok) location.replace("/dashboard");

@@ -75,7 +75,8 @@ import Base from "../layouts/Base.astro";
       alertBox.style.display = "block";
     };
 
-    fetch("/api/setup/status", { cache: "no-store" })
+    const freshUrl = (path) => `${path}${path.includes("?") ? "&" : "?"}_=${Date.now()}`;
+    fetch(freshUrl("/api/setup/status"), { cache: "no-store" })
       .then((res) => res.ok ? res.json() : null)
       .then((json) => {
         if (json?.initialized) {
