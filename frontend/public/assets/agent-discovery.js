@@ -7,6 +7,7 @@
     `${site}/llms-full.txt`,
     `${site}/sitemap.xml`,
     `${site}/auth.md`,
+    `${site}/openapi.json`,
     `${site}/.well-known/api-catalog`,
     `${site}/.well-known/oauth-protected-resource`,
     `${site}/.well-known/oauth-authorization-server`,
@@ -27,7 +28,8 @@
       execute: async () => ({
         site,
         resources: discoveryResources,
-        crawlingPolicy: "Public /files and /files/raw links may be fetched directly. Authenticated pages, APIs, admin pages, setup, upload result pages, and pickup flows are not crawl targets."
+        crawlingPolicy: "Public /files and /files/raw links may be fetched directly. Authenticated pages, APIs, admin pages, setup, upload result pages, and pickup flows are not crawl targets. API clients should read /openapi.json instead of crawling /api/.",
+        uploadProtocol: "Use the R2 direct-upload flow: POST /api/upload/r2/init, PUT to returned presigned R2 URL(s), then POST /api/upload/r2/complete. The legacy POST /api/upload endpoint is retired."
       })
     },
     {
@@ -45,8 +47,13 @@
         openapi: `${site}/openapi.json`,
         oauthProtectedResource: `${site}/.well-known/oauth-protected-resource`,
         publicFilePaths: ["/files/{id}.{ext}", "/files/raw/{id}.{ext}"],
+        uploadApi: {
+          current: ["/api/upload/r2/init", "presigned R2 PUT", "/api/upload/r2/complete"],
+          cancel: "/api/upload/r2/cancel",
+          retired: "/api/upload"
+        },
         blockedPaths: ["/api/", "/admin", "/setup", "/dashboard/", "/uploads/", "/file/", "/f/", "/pickup/"],
-        note: "Public /files and /files/raw links can be fetched directly while they remain public."
+        note: "Public /files and /files/raw links can be fetched directly while they remain public. Upload clients should follow /openapi.json and the R2 direct-upload sequence."
       })
     }
   ];

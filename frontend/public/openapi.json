@@ -3,7 +3,7 @@
   "info": {
     "title": "Files.js.gripe API",
     "version": "1.0.0",
-    "description": "Protected file upload, sharing, and administration API. Public /files and /files/raw links may be fetched directly; protected APIs, dashboards, upload results, setup, and admin pages are not crawl targets."
+    "description": "Protected file upload, sharing, and administration API. Public /files and /files/raw links may be fetched directly; protected APIs, dashboards, upload results, setup, and admin pages are not crawl targets. Uploads use the R2 direct-upload flow: POST /api/upload/r2/init, PUT to returned presigned R2 URL(s), then POST /api/upload/r2/complete. The legacy POST /api/upload endpoint is retired."
   },
   "servers": [
     {
@@ -57,6 +57,7 @@
     "/api/upload/r2/init": {
       "post": {
         "summary": "Create an R2 direct-upload session and presigned URLs",
+        "description": "Send file descriptors with clientId, name, size, type, and optional sha256. Anonymous uploads may be accepted when policy allows them; otherwise this endpoint returns 401.",
         "responses": {
           "200": {
             "description": "Upload session, file ids, and presigned PUT or multipart part URLs"
@@ -73,6 +74,7 @@
     "/api/upload/r2/complete": {
       "post": {
         "summary": "Complete an R2 direct-upload session",
+        "description": "After each file or multipart part has been uploaded to the returned presigned R2 URL(s), send uploadId plus file records containing clientId, fileId, etag, and multipart parts when applicable.",
         "responses": {
           "200": {
             "description": "Upload batch result with pickup code"
@@ -89,6 +91,7 @@
     "/api/upload/r2/cancel": {
       "post": {
         "summary": "Abort an unfinished R2 direct-upload session",
+        "description": "Cancel a previously initialized direct-upload session before it is completed.",
         "responses": {
           "200": {
             "description": "Upload session cancelled"

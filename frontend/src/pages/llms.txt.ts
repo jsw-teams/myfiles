@@ -8,14 +8,17 @@ Public purpose:
 - Logged-in users can manage their own files.
 - File owners can create temporary pickup-code shares and revoke them early.
 - Administrators can audit and manage files according to policy.
+- Upload clients should use the current R2 direct-upload flow, not the retired /api/upload endpoint.
 
 Crawler and AI-use policy:
 - Public /files and /files/raw links are directly fetchable while the file is public.
 - Agents may read public file links, the public homepage, and discovery/authentication metadata.
 - Do not crawl private application surfaces: /pickup, /file, /f, /uploads, /dashboard, /api, /admin, or /setup.
+- API clients may consult /openapi.json for the upload contract. The current upload sequence is POST /api/upload/r2/init, PUT to the returned presigned R2 URL(s), then POST /api/upload/r2/complete. Use POST /api/upload/r2/cancel to abort an unfinished session.
 
 Allowed discovery references:
 - https://files.js.gripe/auth.md
+- https://files.js.gripe/openapi.json
 - https://files.js.gripe/.well-known/api-catalog
 - https://files.js.gripe/.well-known/oauth-protected-resource
 - https://files.js.gripe/.well-known/oauth-authorization-server
